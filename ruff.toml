@@ -1,0 +1,52 @@
+# Ruff configuration for edutech project
+
+line-length = 100
+
+[lint]
+select = ["ALL"]
+ignore = [
+    "D",       # pydocstyle - documentation style
+    "ANN",     # flake8-annotations - type annotations
+    "COM",     # flake8-commas
+    "ERA",     # eradicate - commented code
+    "T20",     # flake8-print
+    "FIX",     # flake8-fixme
+    "TD",      # flake8-todos
+    "Q",       # flake8-quotes
+    "G003",    # logging-string-concat
+    "G004",    # logging-f-string (f-strings in logging are fine in modern Python)
+    "G201",    # logging-exc-info (logging.exception is preferred but both are valid)
+    "E402",    # module-import-not-at-top-of-file (needed for sys.path manipulation)
+    "SLF001",  # private-member-access (intentional internal API usage)
+    "C901",    # complex-structure (main() function is intentionally complex)
+    "PLR0912", # too-many-branches
+    "PLR0915", # too-many-statements
+    "PLR2004", # magic-value-comparison (acceptable for option indices)
+    "BLE001",  # blind-except (sometimes necessary for robust error handling)
+    "TRY003",  # raise-vanilla-args
+    "TRY004",  # prefer-type-error (ValueError is often more appropriate)
+    "TRY300",  # try-consider-else
+    "TRY301",  # raise-within-try
+    "EM101",   # raw-string-in-exception
+    "EM102",   # f-string-in-exception
+    "FBT001",  # boolean-type-hint-positional-argument
+    "FBT002",  # boolean-default-value-positional-argument
+    "RUF012",  # mutable-class-default (ClassVar not needed for simple cases)
+    "DTZ003",  # datetime-utcnow (utcnow is fine for timestamps)
+    "DTZ005",  # datetime-now-without-tz (local time is acceptable)
+    "S324",    # hashlib-insecure-hash-function (MD5 used for content hashing, not security)
+    "PERF203", # try-except-in-loop (sometimes necessary)
+    "PLC0415", # import-outside-toplevel (some imports are conditional/optional)
+    "PLR0913", # too-many-arguments (acceptable for complex configuration)
+    "ARG002",  # unused-method-argument (some args are part of interface)
+    "N806",    # non-lowercase-variable-in-function (constants are uppercase)
+    "PLW2901", # redefined-loop-name (intentional data transformation)
+    "B904",    # raise-without-from-inside-except (simplified error handling)
+    "E722",    # bare-except (fallback error handling)
+    "E501",    # line-too-long (readability over strict length limits)
+    "TRY401",  # redundant-exception-object (logging.exception includes exception automatically)
+    "PTH123",  # open-instead-of-path-open (both are acceptable)
+]
+
+[lint.per-file-ignores]
+"__init__.py" = ["F401"]  # Allow unused imports in __init__ files

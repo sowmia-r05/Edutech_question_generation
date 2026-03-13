@@ -1,0 +1,14 @@
+# Place your PDF files in this directory
+# Expected structure:
+#
+# input/
+# ├── grade4/
+# │   ├── numeracy/
+# │   │   └── *.pdf
+# │   └── english/
+# │       └── *.pdf
+# ├── grade5/
+# │   ├── numeracy/
+# │   │   └── *.pdf
+# │   └── science/
+# │       └── *.pdf
