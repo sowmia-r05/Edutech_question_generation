@@ -1,242 +1,240 @@
-"""CSV export functionality for questions."""
+"""Excel exporter — writes questions into the admin dashboard import template.
+Image URL is in its own separate column, NOT mixed into Question Feedback.
+"""
 
-import csv
-import json
 import logging
+import os
+from datetime import datetime
 from pathlib import Path
-from typing import Any
-
-from src.core.models import Question
+from shutil import copyfile
 
 logger = logging.getLogger(__name__)
 
 
 class CSVExporter:
-    """Export questions to CSV format for LMS bulk upload."""
+    """Export questions into the admin dashboard ImportQuestionsTemplate.xlsx format."""
 
-    # CSV column headers (in LMS bulk-upload order)
-    CSV_HEADERS = [
-        "serial_number",
-        "year",
-        "class",
-        "grade",
-        "subject",
-        "sub_subject",
-        "question_text",
-        "type",
-        "difficulty",
-        "option1",
-        "option2",
-        "option3",
-        "option4",
-        "option5",
-        "option6",
-        "answer",
-        "answer_index",
-        "content",
-        "explanation",
-        "hints",
-        "passage",
-        "citation",
-        "settings",
-        "question_tags",
-        "question_image",
-        "file_path",
-        "pdf_source",
-        "page_number",
-        "artifacts",
-        "last_generated",
+    INSTRUCTION_ROW = 1
+    HEADER_ROW = 2
+    DATA_START_ROW = 3
+
+    # Core columns (matching template exactly)
+    CORE_HEADERS = [
+        "Question Text",            # A
+        "Question Type",            # B
+        "Points Type",              # C
+        "Question Points",          # D
+        "Page Number",              # E
+        "Required",                 # F
+        "Question Feedback",        # G  ← explanation only, NO image tag
+        "Question Categories\n(separate each category with a comma)",  # H
+        "Randomize Options",        # I
+        "Option 1 Text",            # J
+        "Option 1\nCorrect",        # K
+        "Option 1\nPoints",         # L
+        "Option 2 Text",            # M
+        "Option 2\nCorrect",        # N
+        "Option 2\nPoints",         # O
+        "Option 3 Text",            # P
+        "Option 3\nCorrect",        # Q
+        "Option 3\nPoints",         # R
+        "Option 4 Text",            # S
+        "Option 4\nCorrect",        # T
+        "Option 4\nPoints",         # U
+        "Question Image",           # V  ← separate image column
     ]
 
-    @staticmethod
-    def export_to_csv(
-        questions: list[Question], output_path: Path | str, include_headers: bool = True
-    ) -> None:
-        """
-        Export questions to CSV file.
-
-        Args:
-            questions: List of Question objects to export.
-            output_path: Path to the output CSV file.
-            include_headers: Whether to include header row.
-
-        Raises:
-            Exception: If export fails.
-        """
-        output_path = Path(output_path)
-
-        # Ensure output directory exists
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
+    def export_to_xlsx(
+        self,
+        questions,
+        output_path: str | None = None,
+        grade: str = "grade5",
+        template_path: str | None = None,
+    ) -> str:
+        """Write questions into the Excel template starting at row 3."""
         try:
-            with open(output_path, "w", newline="", encoding="utf-8") as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=CSVExporter.CSV_HEADERS)
+            import openpyxl
+            from openpyxl.styles import Alignment, Font, PatternFill
+        except ImportError:
+            raise ImportError("Run: pip install openpyxl")
 
-                if include_headers:
-                    writer.writeheader()
+        if not output_path:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            os.makedirs("output", exist_ok=True)
+            output_path = f"output/questions_{grade}_{timestamp}.xlsx"
 
-                for question in questions:
-                    row = CSVExporter._question_to_csv_row(question)
-                    writer.writerow(row)
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-            logger.info(f"Exported {len(questions)} questions to {output_path}")
+        # Try to find template
+        template_found = None
+        if template_path and Path(template_path).exists():
+            template_found = template_path
+        else:
+            for candidate in [
+                "ImportQuestionsTemplate.xlsx",
+                "ImportQuestionsTemplate__5_.xlsx",
+                "ImportQuestionsTemplate__8_.xlsx",
+            ]:
+                if Path(candidate).exists():
+                    template_found = candidate
+                    break
 
-        except Exception as e:
-            logger.exception(f"Error exporting to CSV: {e}")
-            raise
+        if template_found:
+            copyfile(template_found, output_path)
+            wb = openpyxl.load_workbook(output_path)
+            ws = wb["Template - v1.1"]
+            # Clear data rows only (keep rows 1 and 2)
+            for row in ws.iter_rows(min_row=self.DATA_START_ROW, max_row=ws.max_row):
+                for cell in row:
+                    cell.value = None
+
+            # Add "Question Image" header in column V (col 22)
+            # if not already there
+            image_col = 22
+            if ws.cell(row=self.HEADER_ROW, column=image_col).value is None:
+                cell = ws.cell(row=self.HEADER_ROW, column=image_col, value="Question Image")
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+
+            logger.info(f"Using template: {template_found}")
+        else:
+            logger.warning("Template not found - creating workbook from scratch.")
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Template - v1.1"
+
+            # Write header row
+            for col_idx, h in enumerate(self.CORE_HEADERS, start=1):
+                cell = ws.cell(row=self.HEADER_ROW, column=col_idx, value=h)
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="4472C4", end_color="4472C4",
+                                        fill_type="solid")
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.alignment = Alignment(wrap_text=True, vertical="center",
+                                           horizontal="center")
+
+        # Write question data starting at row 3
+        for q_idx, q in enumerate(questions):
+            row_num = self.DATA_START_ROW + q_idx
+            row_data = self._build_row(q)
+            for col_idx, value in enumerate(row_data, start=1):
+                cell = ws.cell(row=row_num, column=col_idx, value=value)
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+        wb.save(output_path)
+        logger.info(f"Exported {len(questions)} questions to: {output_path}")
+        return output_path
+
+    def export_to_csv(self, questions, output_path=None, grade="grade5") -> str:
+        import csv
+        if not output_path:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            os.makedirs("output", exist_ok=True)
+            output_path = f"output/questions_{grade}_{timestamp}.csv"
+
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+        headers = [
+            "Question Text", "Question Type", "Points Type", "Question Points",
+            "Page Number", "Required", "Question Feedback", "Question Categories",
+            "Randomize Options",
+            "Option 1 Text", "Option 1 Correct", "Option 1 Points",
+            "Option 2 Text", "Option 2 Correct", "Option 2 Points",
+            "Option 3 Text", "Option 3 Correct", "Option 3 Points",
+            "Option 4 Text", "Option 4 Correct", "Option 4 Points",
+            "Question Image",
+        ]
+
+        with open(output_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            for q in questions:
+                writer.writerow(self._build_row(q))
+
+        logger.info(f"Exported {len(questions)} questions to CSV: {output_path}")
+        return output_path
+
+    @classmethod
+    def export_with_summary(cls, questions, output_dir, base_filename) -> dict:
+        exporter = cls()
+        output_path = str(Path(output_dir) / f"{base_filename}.xlsx")
+        out = exporter.export_to_xlsx(questions=questions, output_path=output_path)
+        return {"csv": out, "summary": out}
+
+    def _build_row(self, q) -> list:
+        """
+        Build one data row.
+        Column G = explanation text ONLY
+        Column V = image URL ONLY (separate column)
+        """
+        options = [self._clean_option(opt) for opt in q.options]
+        while len(options) < 4:
+            options.append("")
+
+        correct_idx = self._get_correct_index(q)
+
+        # Feedback = explanation ONLY, no image
+        feedback = getattr(q, "explanation", "") or ""
+
+        # Image URL from artifacts or question_image field
+        image_url = ""
+        artifacts = getattr(q, "artifacts", None)
+        if artifacts and isinstance(artifacts, list) and artifacts:
+            image_url = artifacts[0]
+        elif not image_url:
+            image_url = getattr(q, "question_image", "") or ""
+
+        # Categories
+        categories = getattr(q, "categories", None)
+        if not categories:
+            parts = [p for p in [
+                getattr(q, "grade", ""),
+                getattr(q, "subject", ""),
+                getattr(q, "sub_subject", ""),
+            ] if p]
+            categories = ", ".join(parts)
+
+        row = [
+            q.question_text,    # A: Question Text
+            "Multiple Choice",  # B: Question Type
+            "Points",           # C: Points Type
+            1,                  # D: Question Points
+            1,                  # E: Page Number
+            "Yes",              # F: Required
+            feedback,           # G: Question Feedback (explanation ONLY)
+            categories,         # H: Question Categories
+            "Yes",              # I: Randomize Options
+        ]
+
+        # Options 1-4 (J to U)
+        for i in range(4):
+            opt_text = options[i] if i < len(options) else ""
+            is_correct = "Yes" if i == correct_idx else "No"
+            points = 1 if i == correct_idx else 0
+            row.extend([opt_text, is_correct, points])
+
+        # V: Question Image (separate column, URL only)
+        row.append(image_url)
+
+        return row
+
+    def _get_correct_index(self, q) -> int:
+        val = getattr(q, "correct_option_index", None)
+        if val is not None:
+            return int(val)
+        val = getattr(q, "answer_index", None)
+        if val is not None:
+            return int(val)
+        val = getattr(q, "correct_answer", None)
+        if val is not None:
+            return {"A": 0, "B": 1, "C": 2, "D": 3}.get(str(val).upper(), 0)
+        return 0
 
     @staticmethod
-    def _question_to_csv_row(question: Question) -> dict[str, Any]:
-        """
-        Convert a Question object to a CSV row dictionary for LMS bulk upload.
-
-        Args:
-            question: Question object.
-
-        Returns:
-            Dictionary with CSV column names as keys matching LMS format.
-        """
-        # Handle artifacts - convert list to JSON string
-        artifacts_str = json.dumps(question.artifacts) if question.artifacts else "[]"
-
-        # Create row with all LMS fields
-        return {
-            "serial_number": question.serial_number,
-            "year": question.year,
-            "class": question.class_name,
-            "grade": question.grade,
-            "subject": question.subject,
-            "sub_subject": question.sub_subject,
-            "question_text": question.question_text,
-            "type": question.type,
-            "difficulty": question.difficulty,
-            "option1": question.option1,
-            "option2": question.option2,
-            "option3": question.option3,
-            "option4": question.option4,
-            "option5": question.option5,
-            "option6": question.option6,
-            "answer": question.answer,
-            "answer_index": question.answer_index,
-            "content": question.content,
-            "explanation": question.explanation,
-            "hints": question.hints,
-            "passage": question.passage,
-            "citation": question.citation,
-            "settings": question.settings,
-            "question_tags": question.question_tags,
-            "question_image": question.question_image,
-            "file_path": question.file_path,
-            "pdf_source": question.pdf_source,
-            "page_number": question.page_number,
-            "artifacts": artifacts_str,
-            "last_generated": question.last_generated,
-        }
-
-    @staticmethod
-    def append_to_csv(questions: list[Question], output_path: Path | str) -> None:
-        """
-        Append questions to an existing CSV file.
-
-        Args:
-            questions: List of Question objects to append.
-            output_path: Path to the CSV file.
-
-        Raises:
-            Exception: If append fails.
-        """
-        output_path = Path(output_path)
-
-        # Check if file exists
-        file_exists = output_path.exists()
-
-        try:
-            with open(output_path, "a", newline="", encoding="utf-8") as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=CSVExporter.CSV_HEADERS)
-
-                # Write headers only if file is new
-                if not file_exists:
-                    writer.writeheader()
-
-                for question in questions:
-                    row = CSVExporter._question_to_csv_row(question)
-                    writer.writerow(row)
-
-            logger.info(f"Appended {len(questions)} questions to {output_path}")
-
-        except Exception as e:
-            logger.exception(f"Error appending to CSV: {e}")
-            raise
-
-    @staticmethod
-    def export_with_summary(
-        questions: list[Question], output_dir: Path | str, base_filename: str = "questions"
-    ) -> dict[str, Path]:
-        """
-        Export questions to CSV and create a summary file.
-
-        Args:
-            questions: List of Question objects.
-            output_dir: Directory for output files.
-            base_filename: Base name for output files.
-
-        Returns:
-            Dictionary with paths to created files.
-        """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Export questions to CSV
-        csv_path = output_dir / f"{base_filename}.csv"
-        CSVExporter.export_to_csv(questions, csv_path)
-
-        # Create summary
-        summary_path = output_dir / f"{base_filename}_summary.txt"
-        CSVExporter._create_summary(questions, summary_path)
-
-        return {"csv": csv_path, "summary": summary_path}
-
-    @staticmethod
-    def _create_summary(questions: list[Question], summary_path: Path) -> None:
-        """Create a summary file for the generated questions."""
-        try:
-            # Collect statistics
-            total_questions = len(questions)
-            subjects = {q.subject for q in questions}
-            sub_subjects = {q.sub_subject for q in questions}
-            grades = {q.grade for q in questions}
-            pdf_sources = {q.pdf_source for q in questions}
-
-            # Count questions with artifacts
-            questions_with_artifacts = sum(1 for q in questions if q.artifacts)
-
-            with open(summary_path, "w", encoding="utf-8") as f:
-                f.write("=" * 80 + "\n")
-                f.write("QUESTION GENERATION SUMMARY\n")
-                f.write("=" * 80 + "\n\n")
-
-                f.write(f"Total Questions Generated: {total_questions}\n\n")
-
-                f.write(f"Grades: {', '.join(sorted(grades))}\n")
-                f.write(f"Subjects: {', '.join(sorted(subjects))}\n")
-                f.write(f"Sub-subjects ({len(sub_subjects)}): {', '.join(sorted(sub_subjects))}\n")
-                f.write(f"Source PDFs: {', '.join(sorted(pdf_sources))}\n\n")
-
-                f.write(f"Questions with Visual Artifacts: {questions_with_artifacts}\n")
-                f.write(
-                    f"Questions without Artifacts: {total_questions - questions_with_artifacts}\n\n"
-                )
-
-                # Question number range
-                if questions:
-                    f.write(
-                        f"Question Numbers: {min(q.question_number for q in questions)} - {max(q.question_number for q in questions)}\n"
-                    )
-                    f.write(f"Generation Time: {questions[0].last_generated}\n")
-
-                f.write("\n" + "=" * 80 + "\n")
-
-            logger.info(f"Created summary at {summary_path}")
-
-        except Exception as e:
-            logger.exception(f"Error creating summary: {e}")
+    def _clean_option(option_text: str) -> str:
+        if not option_text:
+            return ""
+        text = str(option_text).strip()
+        if len(text) > 2 and text[1] in (".", ")") and text[0].upper() in "ABCD1234":
+            return text[2:].strip()
+        return text

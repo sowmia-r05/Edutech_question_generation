@@ -14,3 +14,26 @@ typing-extensions>=4.8.0
 
 # Optional: for better development experience
 python-dotenv>=1.0.0  # For managing environment variables
+
+# OpenAI SDK (replaces google-generativeai)
+openai>=1.0.0
+ 
+# PDF page rendering for GPT-4o vision ingestion
+pymupdf>=1.23.0
+ 
+# HTTP requests (for downloading DALL-E images)
+requests>=2.31.0
+ 
+# Vector database
+qdrant-client>=1.7.0
+ 
+# AWS S3 for image storage
+boto3>=1.34.0
+ 
+# Excel export
+openpyxl>=3.1.0
+ 
+# Environment variables
+python-dotenv>=1.0.0
+ 
+typing-extensions>=4.8.0
