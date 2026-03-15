@@ -5,6 +5,11 @@ Three modes:
   --mode exam      → Full exam set (Numeracy: 34q, Language Convention: 50q)
   --mode subtopic  → Sub-topic questions (count varies by difficulty)
   --mode standard  → Custom number of questions (default)
+
+NEW FLAG:
+  --use-practice-test  → Combines book content (grade3_content) with practice test
+                         examples (grade3_practice_test) for richer, style-matched
+                         question generation. Requires both collections to be ingested.
 """
 
 import argparse
@@ -15,7 +20,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Fix Windows Unicode encoding
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
@@ -53,46 +57,85 @@ MODES:
   standard  Custom number of questions (default)
 
 EXAMPLES:
-  # Full numeracy exam set
-  python generate_questions.py --grade grade5 --subject numeracy --mode exam
 
-  # Full language convention exam set
-  python generate_questions.py --grade grade5 --subject language_convention --mode exam
+  # Standard — books only
+  python generate_questions.py --grade grade3 --subject numeracy --num 20
 
-  # Sub-topic questions
-  python generate_questions.py --grade grade5 --subject numeracy --mode subtopic --subtopic fractions --difficulty medium
+  # Combined — books + practice test style (RECOMMENDED)
+  python generate_questions.py --grade grade3 --subject numeracy --num 20 --use-practice-test
 
-  # Standard custom count
-  python generate_questions.py --grade grade5 --subject numeracy --num 50 --mode standard
+  # Full exam set with practice test style
+  python generate_questions.py --grade grade3 --subject numeracy --mode exam --use-practice-test
+
+  # Sub-topic with practice test style
+  python generate_questions.py --grade grade3 --subject numeracy --mode subtopic \\
+      --subtopic "Statistics and Data" --difficulty medium --use-practice-test
 
   # With images
-  python generate_questions.py --grade grade5 --subject numeracy --mode exam --generate-images
+  python generate_questions.py --grade grade3 --subject numeracy --num 10 \\
+      --use-practice-test --generate-images
 
-  # Ingest NAPLAN reference papers first
-  python ingest_content.py --grade grade5 --subject numeracy_naplan_reference --folder input/grade5/naplan_papers/
+  # Ingest order (run these first):
+  #   python ingest_content.py --grade grade3 --subject numeracy
+  #   python ingest_content.py --grade grade3 --subject practice_test
         """,
     )
 
-    parser.add_argument("--grade", required=True, help="Grade level e.g. grade5")
-    parser.add_argument("--subject", help="Subject e.g. numeracy, language_convention, reading")
+    parser.add_argument("--grade", required=True, help="Grade level e.g. grade3")
+    parser.add_argument("--subject", help="Subject e.g. numeracy, language_convention")
     parser.add_argument(
         "--mode", choices=["exam", "subtopic", "standard"], default="standard",
         help="Generation mode (default: standard)",
     )
     parser.add_argument("--subtopic", help="Sub-topic for subtopic mode e.g. fractions")
+    parser.add_argument("--num", type=int, help="Number of questions (standard mode)")
     parser.add_argument(
         "--difficulty", choices=["easy", "medium", "hard", "mixed"],
-        help="Difficulty (subtopic mode) or filter (standard mode)",
+        help="Difficulty filter",
     )
-    parser.add_argument("--num", "-n", type=int, help="Number of questions (standard mode)")
-    parser.add_argument("--topics", nargs="+", help="Filter by topics (standard mode)")
-    parser.add_argument("--no-preview", action="store_true", help="Skip capacity check")
-    parser.add_argument("--generate-images", action="store_true", help="Generate images")
-    parser.add_argument("--image-style", default="educational illustration")
-    parser.add_argument("--output", "-o", type=Path, help="Output file path")
-    parser.add_argument("--model", default="gemini-2.5-flash", help="Gemini model")
     parser.add_argument(
-        "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]
+        "--topics", nargs="+",
+        help='Specific topics e.g. --topics "Addition" "Place Value"',
+    )
+    parser.add_argument(
+        "--use-practice-test", action="store_true",
+        help=(
+            "Combine book content (grade_content) with practice test examples "
+            "(grade_practice_test) for style-matched question generation. "
+            "Requires both collections to be ingested."
+        ),
+    )
+    parser.add_argument(
+        "--no-preview", action="store_true",
+        help="Skip capacity preview and prompt (requires --num)",
+    )
+    parser.add_argument(
+        "--generate-images", action="store_true",
+        help="Generate contextual images for each question",
+    )
+    parser.add_argument(
+        "--image-style", type=str, default="colorful educational diagram",
+        help="Style hint for image generation",
+    )
+    parser.add_argument(
+        "--output", type=str,
+        help="Custom output CSV path (default: output/questions_<grade>_<timestamp>.csv)",
+    )
+    parser.add_argument(
+        "--model", type=str, default="gemini-2.5-flash",
+        help="Gemini model for question generation (default: gemini-2.5-flash)",
+    )
+    parser.add_argument(
+        "--dump", action="store_true",
+        help="Dump all existing questions from Qdrant to CSV without generating new ones",
+    )
+    parser.add_argument(
+        "--regenerate-images", action="store_true",
+        help="Regenerate images for existing questions",
+    )
+    parser.add_argument(
+        "--log-level", type=str, default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
 
     args = parser.parse_args()
@@ -100,22 +143,20 @@ EXAMPLES:
 
     try:
         logger.info("=" * 80)
-        logger.info("NAPLAN QUESTION GENERATION SYSTEM")
+        logger.info("EDUTECH QUESTION GENERATION SYSTEM")
         logger.info("=" * 80)
         logger.info(f"Grade:      {args.grade}")
         logger.info(f"Subject:    {args.subject or 'All'}")
-        logger.info(f"Mode:       {args.mode.upper()}")
-        if args.mode == "subtopic":
-            logger.info(f"Subtopic:   {args.subtopic}")
-            logger.info(f"Difficulty: {args.difficulty or 'mixed'}")
-        elif args.mode == "exam":
-            config = EXAM_SET_CONFIG.get((args.subject or "numeracy").lower(), {})
-            logger.info(f"Target:     {config.get('total_questions', '?')} questions")
+        logger.info(f"Mode:       {args.mode}")
+        logger.info(f"Sources:    {'book + practice_test (combined)' if args.use_practice_test else 'book only'}")
+        if args.mode == "exam":
+            config = EXAM_SET_CONFIG.get((args.subject or "").lower().replace(" ", "_"), {})
+            logger.info(f"Target Qs:  {config.get('total_questions', '?')}")
             logger.info(f"Distribution: {config.get('distribution', {})}")
         logger.info(f"Model:      {args.model}")
         logger.info("=" * 80 + "\n")
 
-        # Initialize
+        # ── Initialise clients ────────────────────────────────────────────────
         logger.info("Initializing clients...")
         embedding_client = EmbeddingClient()
         qdrant_manager = QdrantManager(embedding_dimension=embedding_client.dimension)
@@ -125,16 +166,41 @@ EXAMPLES:
             model_name=args.model,
         )
 
-        # Capacity check (skip for exam/subtopic modes which have fixed counts)
+        # ── Dump mode ─────────────────────────────────────────────────────────
+        if args.dump:
+            logger.info("DUMP MODE: exporting existing questions to CSV")
+            questions = question_generator._load_all_stored_questions(
+                args.grade, args.subject
+            )
+            if not questions:
+                logger.error("No questions found in Qdrant.")
+                sys.exit(1)
+            logger.info(f"Found {len(questions)} questions")
+            _export_and_finish(questions, args, generate_images=False)
+            return
+
+        # ── Capacity check (standard mode only) ──────────────────────────────
         if args.mode == "standard" and not args.no_preview:
             capacity = question_generator.check_capacity(
                 args.grade, args.subject, args.topics, args.difficulty
             )
-            logger.info(f"Capacity: {capacity['estimated_remaining']} questions available")
+            logger.info(f"Capacity:          ~{capacity['estimated_remaining']} questions available")
             logger.info(f"Already generated: {capacity['already_generated']}")
 
+            if args.use_practice_test:
+                # Also check practice_test collection has content
+                pt_col = f"{args.grade}_practice_test"
+                try:
+                    info = qdrant_manager.get_collection_info(pt_col)
+                    logger.info(f"Practice test collection: {info.get('points_count', 0)} chunks")
+                except Exception:
+                    logger.warning(
+                        f"Practice test collection '{pt_col}' not found. "
+                        "Run: python ingest_content.py --grade grade3 --subject practice_test"
+                    )
+
             if capacity["available_chunks"] == 0:
-                logger.error("No content found. Run ingest first:")
+                logger.error("No book content found. Run ingest first:")
                 logger.error(f"  python ingest_content.py --grade {args.grade}")
                 sys.exit(1)
 
@@ -152,20 +218,18 @@ EXAMPLES:
             logger.error("--num required in standard mode with --no-preview")
             sys.exit(1)
 
-        # Validate subtopic mode args
         if args.mode == "subtopic" and not args.subtopic:
             logger.error("--subtopic required for subtopic mode")
-            logger.error("Example: --subtopic fractions")
             sys.exit(1)
 
-        # ── GENERATE ──────────────────────────────────────────
+        # ── GENERATE ──────────────────────────────────────────────────────────
         if args.mode == "exam":
             if not args.subject:
                 logger.error("--subject required for exam mode")
-                logger.error("Available: numeracy, language_convention, reading")
                 sys.exit(1)
             result = question_generator.generate_exam_set(
-                grade=args.grade, subject=args.subject
+                grade=args.grade,
+                subject=args.subject,
             )
 
         elif args.mode == "subtopic":
@@ -184,111 +248,78 @@ EXAMPLES:
                 difficulty=args.difficulty,
                 num_questions=args.num,
                 content_chunks_limit=20,
+                use_practice_test=args.use_practice_test,   # ← passed through
             )
 
         questions = result["questions"]
 
         if not questions:
-            logger.error("No questions generated. Check if PDFs are ingested.")
-            logger.error(f"Run: python ingest_content.py --grade {args.grade}")
+            logger.error("No questions generated.")
+            logger.error(
+                "Ensure PDFs are ingested:\n"
+                f"  python ingest_content.py --grade {args.grade} --subject numeracy\n"
+                + (
+                    f"  python ingest_content.py --grade {args.grade} --subject practice_test"
+                    if args.use_practice_test else ""
+                )
+            )
             sys.exit(1)
 
-        # ── STATS ─────────────────────────────────────────────
-        logger.info("\n" + "=" * 80)
-        logger.info("GENERATION RESULTS")
-        logger.info("=" * 80)
-        logger.info(f"Mode:              {result.get('mode', args.mode).upper()}")
-        logger.info(f"Status:            {result.get('status', '').upper()}")
-        logger.info(f"Questions:         {len(questions)}")
-        if result.get("target"):
-            logger.info(f"Target:            {result['target']}")
-        if result.get("duplicates_avoided"):
-            logger.info(f"Duplicates avoided:{result['duplicates_avoided']}")
-        if result.get("naplan_rejected"):
-            logger.info(f"NAPLAN rejected:   {result['naplan_rejected']}")
+        sources = result.get("sources_used", ["book_content"])
+        logger.info(f"\nGenerated {len(questions)} questions  (sources: {', '.join(sources)})")
+        logger.info(f"Duplicates avoided: {result.get('duplicates_avoided', 0)}")
+        logger.info(f"NAPLAN rejected:    {result.get('naplan_rejected', 0)}")
+        logger.info(f"Status:             {result.get('status', 'unknown')}")
 
-        # Difficulty breakdown
-        diff_counts = {}
-        for q in questions:
-            diff_counts[q.difficulty] = diff_counts.get(q.difficulty, 0) + 1
-        logger.info(f"Difficulty breakdown: {diff_counts}")
-        logger.info("=" * 80 + "\n")
-
-        # ── IMAGES ────────────────────────────────────────────
-        if args.generate_images:
-            logger.info(f"Generating images for {len(questions)} questions...")
-            try:
-                s3_uploader = S3Uploader()
-                if not s3_uploader.verify_bucket_access():
-                    logger.error("Cannot access S3. Check AWS credentials.")
-                    logger.warning("Skipping image generation.")
-                else:
-                    image_generator = ImageGenerator(s3_uploader=s3_uploader)
-                    s3_urls = image_generator.generate_images_batch(
-                        questions=questions, image_style=args.image_style
-                    )
-                    for q in questions:
-                        if q.question_number in s3_urls:
-                            url = s3_urls[q.question_number]
-                            q.question_image = url
-                            q.artifacts = q.artifacts or []
-                            q.artifacts.append(url)
-                            q.images_path.append(url)
-                            q.images_tagged_count = len(q.images_path)
-                    logger.info(f"Images generated: {len(s3_urls)}/{len(questions)}")
-            except Exception as e:
-                logger.warning(f"Image generation error: {e} - continuing without images")
-
-        # ── EXPORT ────────────────────────────────────────────
-        output_path = _build_output_path(args, result)
-        csv_exporter = CSVExporter()
-        out = csv_exporter.export_to_xlsx(
-            questions=questions,
-            output_path=str(output_path),
-            grade=args.grade,
-            template_path="ImportQuestionsTemplate.xlsx",
-        )
-
-        logger.info("=" * 80)
-        logger.info("COMPLETE")
-        logger.info("=" * 80)
-        logger.info(f"Questions: {len(questions)}")
-        logger.info(f"Output:    {out}")
-        logger.info("=" * 80 + "\n")
-
-        # Sample preview
-        logger.info("Sample Questions:")
-        for i, q in enumerate(questions[:3], 1):
-            logger.info(f"\n{i}. [{q.difficulty.upper()}] {q.question_text}")
-            for j, opt in enumerate(q.options):
-                marker = ">" if j == q.correct_option_index else " "
-                logger.info(f"   [{marker}] {opt}")
-        if len(questions) > 3:
-            logger.info(f"\n... and {len(questions) - 3} more questions")
+        _export_and_finish(questions, args, generate_images=args.generate_images)
 
     except KeyboardInterrupt:
-        logger.warning("Cancelled by user")
+        logger.warning("Generation cancelled by user.")
         sys.exit(130)
     except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
+        logger.error(f"Unexpected error: {e}", exc_info=True)
         sys.exit(1)
 
 
-def _build_output_path(args, result: dict) -> Path:
-    if args.output:
-        return args.output
+def _export_and_finish(questions: list, args, generate_images: bool) -> None:
+    """Export questions to CSV and optionally generate images."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path("output")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    mode = result.get("mode", args.mode)
-    subject = (args.subject or "all").replace(" ", "_")
-    if mode == "subtopic" and args.subtopic:
-        name = f"questions_{args.grade}_{subject}_{args.subtopic}_{args.difficulty or 'mixed'}_{timestamp}"
-    elif mode == "exam":
-        name = f"exam_set_{args.grade}_{subject}_{timestamp}"
-    else:
-        name = f"questions_{args.grade}_{subject}_{timestamp}"
-    return output_dir / f"{name}.xlsx"
+    grade_str = args.grade
+    output_path = args.output or f"output/questions_{grade_str}_{timestamp}.csv"
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    if generate_images:
+        logger.info(f"\nGenerating images for {len(questions)} questions...")
+        s3_uploader = S3Uploader()
+        image_generator = ImageGenerator(s3_uploader=s3_uploader)
+        questions = image_generator.generate_images_for_questions(
+            questions=questions,
+            grade=args.grade,
+            subject=args.subject or "numeracy",
+            style=getattr(args, "image_style", "colorful educational diagram"),
+        )
+
+    exporter = CSVExporter()
+    exporter.export(questions=questions, output_path=output_path)
+
+    summary_path = output_path.replace(".csv", "_summary.txt")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        f.write(f"Generation Summary\n{'=' * 40}\n")
+        f.write(f"Grade:     {args.grade}\n")
+        f.write(f"Subject:   {getattr(args, 'subject', 'all') or 'all'}\n")
+        f.write(f"Mode:      {getattr(args, 'mode', 'standard')}\n")
+        f.write(f"Sources:   {'book + practice_test' if getattr(args, 'use_practice_test', False) else 'book only'}\n")
+        f.write(f"Questions: {len(questions)}\n")
+        f.write(f"CSV:       {output_path}\n")
+        f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+
+    logger.info(f"\n{'=' * 80}")
+    logger.info("GENERATION COMPLETE")
+    logger.info(f"{'=' * 80}")
+    logger.info(f"Questions: {len(questions)}")
+    logger.info(f"CSV file:  {output_path}")
+    logger.info(f"Summary:   {summary_path}")
+    logger.info(f"{'=' * 80}\n")
 
 
 if __name__ == "__main__":
