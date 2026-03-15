@@ -1,7 +1,27 @@
-"""Excel exporter — writes questions into the admin dashboard import template.
-Image URL is in its own separate column, NOT mixed into Question Feedback.
+"""Excel exporter — writes questions into the EXACT Quiz Upload Template format.
+
+Template: Quiz_Upload_Template__1_.xlsx
+Sheet:    Questions
+Row 1:    Headers  (fill: #4338CA, font: white bold 11pt, center aligned)
+Row 2:    Instructions (fill: #EEF2FF, font: Calibri)
+Row 3+:   Data rows   (fill: #EFF6FF, font: Calibri, wrap text)
+
+Columns:
+  A: question_text  ← HTML with embedded base64 image when available
+  B: type
+  C: option_a
+  D: option_b
+  E: option_c
+  F: option_d
+  G: correct_answer
+  H: points
+  I: category
+  J: image_url      ← S3 URL kept for reference
+  K: explanation
 """
 
+import base64
+import io
 import logging
 import os
 from datetime import datetime
@@ -10,41 +30,106 @@ from shutil import copyfile
 
 logger = logging.getLogger(__name__)
 
+# Max image size in bytes before compression (20 KB)
+MAX_IMAGE_BYTES = 20 * 1024
+
+
+def compress_image_to_limit(image_bytes: bytes, max_bytes: int = MAX_IMAGE_BYTES) -> bytes:
+    """
+    Compress a PNG/JPEG image to stay under max_bytes using PIL.
+    Tries progressively lower quality until the target is met.
+    Returns compressed bytes (PNG if original was PNG, JPEG otherwise).
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.warning("Pillow not installed — image not compressed. Run: pip install Pillow")
+        return image_bytes
+
+    if len(image_bytes) <= max_bytes:
+        return image_bytes
+
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+    # Step 1: Shrink dimensions progressively
+    for scale in [0.8, 0.6, 0.5, 0.4, 0.3, 0.25, 0.2]:
+        w = int(img.width * scale)
+        h = int(img.height * scale)
+        resized = img.resize((max(w, 60), max(h, 60)), Image.LANCZOS)
+
+        # Step 2: Try JPEG at decreasing quality
+        for quality in [85, 70, 55, 40, 30, 20]:
+            buf = io.BytesIO()
+            resized.save(buf, format="JPEG", quality=quality, optimize=True)
+            data = buf.getvalue()
+            if len(data) <= max_bytes:
+                logger.info(
+                    f"Image compressed: {len(image_bytes)//1024}KB → "
+                    f"{len(data)//1024}KB  (scale={scale}, quality={quality})"
+                )
+                return data
+
+    # Last resort — very small JPEG
+    buf = io.BytesIO()
+    img.resize((80, 60)).save(buf, format="JPEG", quality=15, optimize=True)
+    data = buf.getvalue()
+    logger.warning(f"Image aggressively compressed to {len(data)} bytes")
+    return data
+
 
 class CSVExporter:
-    """Export questions into the admin dashboard ImportQuestionsTemplate.xlsx format."""
+    """Export questions into the exact Quiz Upload Template xlsx format."""
 
-    INSTRUCTION_ROW = 1
-    HEADER_ROW = 2
+    HEADER_ROW     = 1
+    INST_ROW       = 2
     DATA_START_ROW = 3
 
-    # Core columns (matching template exactly)
-    CORE_HEADERS = [
-        "Question Text",            # A
-        "Question Type",            # B
-        "Points Type",              # C
-        "Question Points",          # D
-        "Page Number",              # E
-        "Required",                 # F
-        "Question Feedback",        # G  ← explanation only, NO image tag
-        "Question Categories\n(separate each category with a comma)",  # H
-        "Randomize Options",        # I
-        "Option 1 Text",            # J
-        "Option 1\nCorrect",        # K
-        "Option 1\nPoints",         # L
-        "Option 2 Text",            # M
-        "Option 2\nCorrect",        # N
-        "Option 2\nPoints",         # O
-        "Option 3 Text",            # P
-        "Option 3\nCorrect",        # Q
-        "Option 3\nPoints",         # R
-        "Option 4 Text",            # S
-        "Option 4\nCorrect",        # T
-        "Option 4\nPoints",         # U
-        "Question Image",           # V  ← separate image column
+    # Exact column headers from the template
+    HEADERS = [
+        "question_text",
+        "type",
+        "option_a",
+        "option_b",
+        "option_c",
+        "option_d",
+        "correct_answer",
+        "points",
+        "category",
+        "image_url",
+        "explanation",
     ]
 
-    # ── Sub-subject → Major Topic lookup sets ────────────────────────────────
+    INSTRUCTIONS = [
+        "The question text (REQUIRED)",
+        "radio_button | checkbox | free_text | picture_choice",
+        "Option A text",
+        "Option B text",
+        "Option C text (optional)",
+        "Option D text (optional)",
+        "Letter: A, B, C, D (comma-separate for checkbox)",
+        "Points (default: 1)",
+        "Topic — e.g. Fractions, Grammar",
+        "URL to question image (optional)",
+        "Explanation shown after quiz (optional)",
+    ]
+
+    # Exact colors from template inspection
+    _HDR_FILL  = "FF4338CA"   # Row 1 — deep indigo
+    _INST_FILL = "FFEEF2FF"   # Row 2 — light lavender
+    _DATA_FILL = "FFEFF6FF"   # Row 3+ — very light blue
+
+    # Column widths matching the template exactly
+    _COL_WIDTHS = {
+        "A": 50.0, "B": 18.0, "C": 22.0, "D": 22.0, "E": 22.0,
+        "F": 22.0, "G": 16.0, "H": 10.0, "I": 22.0, "J": 30.0, "K": 40.0,
+    }
+
+    # Row heights matching the template
+    _HDR_HEIGHT  = 36.0
+    _INST_HEIGHT = 30.0
+    _DATA_HEIGHT = 32.0
+
+    # ── Sub-subject → Major Topic lookup sets ─────────────────────────────────
 
     _NUMBER_ALGEBRA_SUBS = {
         "counting objects", "reading numbers", "ordering numbers",
@@ -56,7 +141,6 @@ class CSVExporter:
         "increasing patterns", "skip counting", "missing numbers",
         "odd and even numbers", "half", "quarter", "equal parts",
         "adding money", "subtracting money", "counting coins",
-        # broader labels Gemini sometimes returns
         "place value", "addition", "subtraction", "multiplication",
         "division", "number patterns", "fractions", "money",
         "counting and number recognition", "multiplication groups and arrays",
@@ -85,16 +169,21 @@ class CSVExporter:
         0: "Easy", 1: "Easy", 2: "Medium", 3: "Medium", 4: "Hard", 5: "Hard"
     }
 
+    _CORRECT_LETTER_MAP = {0: "A", 1: "B", 2: "C", 3: "D"}
+
     # ─────────────────────────────────────────────────────────────────────────
 
     def export_to_xlsx(
         self,
         questions,
         output_path: str | None = None,
-        grade: str = "grade5",
+        grade: str = "grade",
         template_path: str | None = None,
     ) -> str:
-        """Write questions into the Excel template starting at row 3."""
+        """
+        Write questions into the Quiz Upload Template xlsx format.
+        Uses the exact template file to preserve all styling.
+        """
         try:
             import openpyxl
             from openpyxl.styles import Alignment, Font, PatternFill
@@ -108,66 +197,93 @@ class CSVExporter:
 
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-        # Try to find template
+        # ── Find and copy the EXACT template file ─────────────────────────────
         template_found = None
-        if template_path and Path(template_path).exists():
-            template_found = template_path
-        else:
-            for candidate in [
-                "ImportQuestionsTemplate.xlsx",
-                "ImportQuestionsTemplate__5_.xlsx",
-                "ImportQuestionsTemplate__8_.xlsx",
-            ]:
-                if Path(candidate).exists():
-                    template_found = candidate
-                    break
+        candidates = []
+        if template_path:
+            candidates.append(template_path)
+        candidates += [
+            "Quiz_Upload_Template__1_.xlsx",
+            "Quiz_Upload_Template.xlsx",
+        ]
+        for c in candidates:
+            if Path(c).exists():
+                template_found = c
+                break
 
         if template_found:
+            # Copy template → output path to preserve ALL styles exactly
             copyfile(template_found, output_path)
             wb = openpyxl.load_workbook(output_path)
-            ws = wb["Template - v1.1"]
-            # Clear data rows only (keep rows 1 and 2)
+            ws = wb["Questions"]
+
+            # Clear only the example data rows (row 3 onwards)
             for row in ws.iter_rows(min_row=self.DATA_START_ROW, max_row=ws.max_row):
                 for cell in row:
                     cell.value = None
 
-            # Add "Question Image" header in column V (col 22) if not already there
-            image_col = 22
-            if ws.cell(row=self.HEADER_ROW, column=image_col).value is None:
-                cell = ws.cell(row=self.HEADER_ROW, column=image_col, value="Question Image")
-                cell.font = Font(bold=True)
-                cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
-
-            logger.info(f"Using template: {template_found}")
+            logger.info(f"Using exact template: {template_found}")
         else:
-            logger.warning("Template not found - creating workbook from scratch.")
+            # Build from scratch matching the template exactly
+            logger.warning(
+                "Quiz_Upload_Template__1_.xlsx not found in project root. "
+                "Copy it there for pixel-perfect output. Building from scratch."
+            )
             wb = openpyxl.Workbook()
             ws = wb.active
-            ws.title = "Template - v1.1"
+            ws.title = "Questions"
 
-            # Write header row
-            for col_idx, h in enumerate(self.CORE_HEADERS, start=1):
-                cell = ws.cell(row=self.HEADER_ROW, column=col_idx, value=h)
-                cell.font = Font(bold=True)
-                cell.fill = PatternFill(start_color="4472C4", end_color="4472C4",
-                                        fill_type="solid")
-                cell.font = Font(bold=True, color="FFFFFF")
-                cell.alignment = Alignment(wrap_text=True, vertical="center",
-                                           horizontal="center")
+            hdr_fill  = PatternFill("solid", fgColor=self._HDR_FILL)
+            hdr_font  = Font(name="Calibri", bold=True, color="FFFFFFFF", size=11)
+            hdr_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-        # Write question data starting at row 3
+            inst_fill  = PatternFill("solid", fgColor=self._INST_FILL)
+            inst_font  = Font(name="Calibri", size=10)
+            inst_align = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+            for col_idx, (h, inst) in enumerate(
+                zip(self.HEADERS, self.INSTRUCTIONS), start=1
+            ):
+                c1 = ws.cell(row=1, column=col_idx, value=h)
+                c1.font = hdr_font; c1.fill = hdr_fill; c1.alignment = hdr_align
+                c2 = ws.cell(row=2, column=col_idx, value=inst)
+                c2.font = inst_font; c2.fill = inst_fill; c2.alignment = inst_align
+
+            for col_letter, width in self._COL_WIDTHS.items():
+                ws.column_dimensions[col_letter].width = width
+
+            ws.row_dimensions[1].height = self._HDR_HEIGHT
+            ws.row_dimensions[2].height = self._INST_HEIGHT
+
+        # ── Write question data starting at row 3 ────────────────────────────
+        try:
+            from openpyxl.styles import Alignment, Font, PatternFill
+            data_fill  = PatternFill("solid", fgColor=self._DATA_FILL)
+            data_font  = Font(name="Calibri", size=11)
+            data_align = Alignment(vertical="center", wrap_text=True)
+        except Exception:
+            data_fill  = None
+            data_font  = None
+            data_align = None
+
         for q_idx, q in enumerate(questions):
-            row_num = self.DATA_START_ROW + q_idx
+            row_num  = self.DATA_START_ROW + q_idx
             row_data = self._build_row(q)
+
+            ws.row_dimensions[row_num].height = self._DATA_HEIGHT
+
             for col_idx, value in enumerate(row_data, start=1):
                 cell = ws.cell(row=row_num, column=col_idx, value=value)
-                cell.alignment = Alignment(wrap_text=True, vertical="top")
+                if data_fill:
+                    cell.fill      = data_fill
+                    cell.font      = data_font
+                    cell.alignment = data_align
 
         wb.save(output_path)
         logger.info(f"Exported {len(questions)} questions to: {output_path}")
         return output_path
 
-    def export_to_csv(self, questions, output_path=None, grade="grade5") -> str:
+    def export_to_csv(self, questions, output_path=None, grade="grade") -> str:
         import csv
         if not output_path:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -176,20 +292,9 @@ class CSVExporter:
 
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-        headers = [
-            "Question Text", "Question Type", "Points Type", "Question Points",
-            "Page Number", "Required", "Question Feedback", "Question Categories",
-            "Randomize Options",
-            "Option 1 Text", "Option 1 Correct", "Option 1 Points",
-            "Option 2 Text", "Option 2 Correct", "Option 2 Points",
-            "Option 3 Text", "Option 3 Correct", "Option 3 Points",
-            "Option 4 Text", "Option 4 Correct", "Option 4 Points",
-            "Question Image",
-        ]
-
         with open(output_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(headers)
+            writer.writerow(self.HEADERS)
             for q in questions:
                 writer.writerow(self._build_row(q))
 
@@ -203,71 +308,74 @@ class CSVExporter:
         out = exporter.export_to_xlsx(questions=questions, output_path=output_path)
         return {"csv": out, "summary": out}
 
+    # ── Row builder ───────────────────────────────────────────────────────────
+
     def _build_row(self, q) -> list:
         """
         Build one data row.
-        Column G = explanation text ONLY
-        Column H = clean readable categories: "Major Topic, Sub Topic, Difficulty"
-        Column V = image URL ONLY (separate column)
+
+        question_text (column A):
+          - No image  → plain question text
+          - Has image → HTML:
+              <p>question text<br /><img src="data:image/png;base64,..."/></p>
+            Image is compressed to <20KB before encoding.
+
+        image_url (column J): S3 URL kept for reference.
         """
-        options = [self._clean_option(opt) for opt in q.options]
+        options = list(getattr(q, "options", []) or [])
         while len(options) < 4:
             options.append("")
+        options = [self._clean_option(opt) for opt in options[:4]]
 
-        correct_idx = self._get_correct_index(q)
+        correct_idx    = self._get_correct_index(q)
+        correct_letter = self._CORRECT_LETTER_MAP.get(correct_idx, "A")
 
-        # Feedback = explanation ONLY, no image
-        feedback = getattr(q, "explanation", "") or ""
-
-        # Image URL from artifacts or question_image field
+        # S3 URL → column J
         image_url = ""
         artifacts = getattr(q, "artifacts", None)
         if artifacts and isinstance(artifacts, list) and artifacts:
-            image_url = artifacts[0]
-        elif not image_url:
+            image_url = str(artifacts[0])
+        if not image_url:
             image_url = getattr(q, "question_image", "") or ""
 
-        # Categories — clean human-readable
-        categories = self._build_categories(q)
+        explanation = getattr(q, "explanation", "") or ""
+        category    = self._build_categories(q)
 
-        row = [
-            q.question_text,    # A: Question Text
-            "Multiple Choice",  # B: Question Type
-            "Points",           # C: Points Type
-            1,                  # D: Question Points
-            1,                  # E: Page Number
-            "Yes",              # F: Required
-            feedback,           # G: Question Feedback (explanation ONLY)
-            categories,         # H: Question Categories
-            "Yes",              # I: Randomize Options
+        # ── question_text: embed base64 image if available ────────────────────
+        # q.image_base64 is set by generate_questions.py after downloading
+        # the S3 image, compressing it to <20KB, and encoding as base64.
+        image_b64 = getattr(q, "image_base64", None) or ""
+        if image_b64:
+            if not image_b64.startswith("data:"):
+                image_b64 = f"data:image/png;base64,{image_b64}"
+            question_html = (
+                f"<p>{q.question_text}"
+                f"<br /><img src=\"{image_b64}\" /></p>"
+            )
+        else:
+            question_html = q.question_text
+
+        return [
+            question_html,      # A — question_text (HTML with embedded image)
+            "radio_button",     # B — type
+            options[0],         # C — option_a
+            options[1],         # D — option_b
+            options[2],         # E — option_c
+            options[3],         # F — option_d
+            correct_letter,     # G — correct_answer
+            1,                  # H — points
+            category,           # I — category
+            image_url,          # J — image_url (S3 URL)
+            explanation,        # K — explanation
         ]
 
-        # Options 1-4 (J to U)
-        for i in range(4):
-            opt_text = options[i] if i < len(options) else ""
-            is_correct = "Yes" if i == correct_idx else "No"
-            points = 1 if i == correct_idx else 0
-            row.extend([opt_text, is_correct, points])
-
-        # V: Question Image (separate column, URL only)
-        row.append(image_url)
-
-        return row
+    # ── Category builder ──────────────────────────────────────────────────────
 
     def _build_categories(self, q) -> str:
-        """
-        Build clean human-readable categories string.
-        Format: "Major Topic, Sub Topic, Difficulty"
-
-        Examples:
-          "Number & Algebra, Place Value, Easy"
-          "Measurement & Geometry, Length, Medium"
-          "Statistics & Probability, Bar Graphs, Hard"
-        """
-        sub = (getattr(q, "sub_subject", "") or "").strip()
+        """Returns: "Major Topic, Sub Topic, Difficulty"  e.g. "Number & Algebra, Place Value, Easy" """
+        sub       = (getattr(q, "sub_subject", "") or "").strip()
         sub_lower = sub.lower()
 
-        # ── Determine Major Topic ────────────────────────────────────────────
         if sub_lower in self._NUMBER_ALGEBRA_SUBS:
             major = "Number & Algebra"
         elif sub_lower in self._MEASUREMENT_GEOMETRY_SUBS:
@@ -275,7 +383,6 @@ class CSVExporter:
         elif sub_lower in self._STATISTICS_PROBABILITY_SUBS:
             major = "Statistics & Probability"
         else:
-            # Keyword fallback for sub_subjects not in the sets
             if any(k in sub_lower for k in [
                 "count", "number", "add", "subtract", "multipl", "divis",
                 "fraction", "money", "pattern", "place", "odd", "even",
@@ -296,10 +403,8 @@ class CSVExporter:
             else:
                 major = "Numeracy"
 
-        # ── Sub Topic display — title case, clean ────────────────────────────
         sub_display = sub.title() if sub else "General"
 
-        # ── Difficulty label ─────────────────────────────────────────────────
         diff_int = getattr(q, "difficulty", 0)
         try:
             diff_int = int(diff_int)
@@ -308,6 +413,8 @@ class CSVExporter:
         diff_label = self._DIFFICULTY_LABELS.get(diff_int, "Easy")
 
         return f"{major}, {sub_display}, {diff_label}"
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _get_correct_index(self, q) -> int:
         val = getattr(q, "correct_option_index", None)
