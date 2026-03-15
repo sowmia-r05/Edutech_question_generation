@@ -4,6 +4,8 @@ Question generator with:
 - Non-repetitive generation across all runs (Qdrant-backed deduplication)
 - Full exam set mode (Numeracy: 34q, Language Convention: 50q)
 - Sub-topic mode (variable count based on difficulty)
+- Primary Math full set mode (35q, all 3 major areas)
+- Major topic mode (18q, one major area, chosen difficulty)
 """
 
 import json
@@ -62,6 +64,111 @@ EXAM_SET_CONFIG = {
             "text structure", "author purpose", "literal meaning",
         ],
     },
+
+    # ── PRIMARY MATH FULL SET (35 questions covering all 3 major areas) ──────
+    # Area breakdown: Number & Algebra = 18q, Measurement & Geometry = 10q,
+    #                 Statistics & Probability = 7q
+    "primary_math": {
+        "total_questions": 35,
+        "distribution": {"easy": 11, "medium": 17, "hard": 7},
+        "topics": [
+            # Number & Algebra (18 of 35)
+            "counting and number recognition",
+            "place value",
+            "addition",
+            "subtraction",
+            "multiplication groups and arrays",
+            "division sharing",
+            "number patterns",
+            "odd and even numbers",
+            "simple fractions",
+            "money",
+            # Measurement & Geometry (10 of 35)
+            "length",
+            "mass",
+            "capacity",
+            "time",
+            "area",
+            "2D shapes",
+            "3D objects",
+            "position and direction",
+            # Statistics & Probability (7 of 35)
+            "reading graphs",
+            "picture graphs",
+            "bar graphs",
+            "data interpretation",
+            "chance likely unlikely",
+        ],
+    },
+}
+
+
+# ============================================================
+# PRIMARY MATH — MAJOR TOPIC → SUBTOPIC MAP
+# Used by generate_major_topic_questions() for the 18-question mode.
+# ============================================================
+PRIMARY_MATH_MAJOR_TOPICS: dict[str, list[str]] = {
+    "number_and_algebra": [
+        # Counting & Number Recognition
+        "counting objects",
+        "reading numbers",
+        "ordering numbers",
+        # Place Value
+        "tens and ones",
+        "hundreds",
+        "value of digits",
+        # Addition
+        "simple addition",
+        "addition with carrying",
+        # Subtraction
+        "simple subtraction",
+        "subtraction with regrouping",
+        # Multiplication
+        "repeated addition",
+        "groups of objects",
+        "simple multiplication facts",
+        # Division
+        "sharing equally",
+        "grouping objects",
+        # Number Patterns
+        "increasing patterns",
+        "skip counting",
+        "missing numbers",
+        # Odd and Even Numbers
+        "odd and even numbers",
+        # Simple Fractions
+        "half",
+        "quarter",
+        "equal parts",
+        # Money
+        "adding money",
+        "subtracting money",
+        "counting coins",
+    ],
+    "measurement_and_geometry": [
+        "length",
+        "mass",
+        "capacity",
+        "time",
+        "area",
+        "2D shapes",
+        "3D objects",
+        "position and direction",
+    ],
+    "statistics_and_probability": [
+        "reading graphs",
+        "picture graphs",
+        "bar graphs",
+        "data interpretation",
+        "chance likely unlikely",
+    ],
+}
+
+# How the 18 questions are split by difficulty for the major-topic mode.
+MAJOR_TOPIC_DIFFICULTY_DISTRIBUTION: dict[str, dict[str, int]] = {
+    "easy":   {"easy": 18},
+    "medium": {"easy": 4, "medium": 10, "hard": 4},
+    "hard":   {"medium": 4, "hard": 14},
 }
 
 SUBTOPIC_QUESTION_COUNT = {
@@ -129,6 +236,16 @@ def _grade_to_class_name(grade: str) -> str:
     return f"Grade {num}" if num else grade.capitalize()
 
 
+def _safe_int(value, default: int = 0) -> int:
+    """Convert value to int safely — handles None, 'N/A', floats, strings."""
+    if value is None:
+        return default
+    try:
+        return int(float(str(value).strip()))
+    except (ValueError, TypeError):
+        return default
+
+
 def _salvage_partial_json(text: str) -> list[dict]:
     """
     Robustly parse a JSON array — handles both complete and truncated responses.
@@ -140,42 +257,42 @@ def _salvage_partial_json(text: str) -> list[dict]:
          using a bracket-depth counter, so partial responses still yield
          the questions that were fully written.
     """
-    start = text.find("[")
-    if start == -1:
-        return []
+    # 1. Full parse
+    try:
+        result = json.loads(text)
+        if isinstance(result, list):
+            return result
+    except json.JSONDecodeError:
+        pass
 
-    # Attempt 1: normal full parse
-    end = text.rfind("]") + 1
-    if end > 0:
-        try:
-            return json.loads(text[start:end])
-        except json.JSONDecodeError:
-            pass
+    # 2. Add missing closing bracket and retry
+    try:
+        result = json.loads(text + "]")
+        if isinstance(result, list):
+            return result
+    except json.JSONDecodeError:
+        pass
 
-    # Attempt 2: bracket-depth salvage for truncated arrays
+    # 3. Object-by-object extraction
     salvaged = []
     depth = 0
-    obj_start = None
-    for i, ch in enumerate(text[start:], start=start):
+    start = None
+    for i, ch in enumerate(text):
         if ch == "{":
             if depth == 0:
-                obj_start = i
+                start = i
             depth += 1
         elif ch == "}":
             depth -= 1
-            if depth == 0 and obj_start is not None:
-                fragment = text[obj_start: i + 1]
+            if depth == 0 and start is not None:
+                fragment = text[start: i + 1]
                 try:
                     obj = json.loads(fragment)
-                    salvaged.append(obj)
+                    if isinstance(obj, dict):
+                        salvaged.append(obj)
                 except json.JSONDecodeError:
                     pass
-                obj_start = None
-
-    if salvaged:
-        logger.warning(
-            f"JSON was truncated — salvaged {len(salvaged)} complete objects from partial response."
-        )
+                start = None
     return salvaged
 
 
@@ -244,7 +361,7 @@ class QuestionGeneratorV2:
         self.client = genai.Client(api_key=self.api_key)
 
         logger.info(f"Initialized QuestionGeneratorV2 with model: {model_name}")
-        logger.info("Modes: exam_set | subtopic | standard")
+        logger.info("Modes: exam_set | subtopic | standard | major_topic")
         logger.info("Safeguards: NAPLAN validation, cross-run dedup, anti-hallucination")
 
     # ============================================================
@@ -263,6 +380,10 @@ class QuestionGeneratorV2:
 
         logger.info(f"Generating exam set: {total} questions for {grade} {subject}")
         logger.info(f"Distribution: {distribution}")
+
+        # ── Special path: primary_math cycles through all 3 areas evenly ─────
+        if subject_key == "primary_math":
+            return self._generate_primary_math_full_set(grade, total, distribution, topics)
 
         all_questions: list[Question] = []
         for difficulty, count in distribution.items():
@@ -290,6 +411,172 @@ class QuestionGeneratorV2:
             "status": "complete" if len(all_questions) >= total else "partial",
         }
 
+    # ------------------------------------------------------------------
+    # PRIMARY MATH FULL SET (35 questions across all 3 major areas)
+    # ------------------------------------------------------------------
+
+    def _generate_primary_math_full_set(
+        self,
+        grade: str,
+        total: int,
+        distribution: dict[str, int],
+        topics: list[str],
+    ) -> dict[str, Any]:
+        """
+        Generate 34-35 primary math questions covering ALL listed subtopics.
+
+        Strategy: the topic list is already ordered by area (Number & Algebra
+        first, then Measurement & Geometry, then Statistics & Probability).
+        We split it into three buckets and hit each one proportionally so no
+        area is left out.
+        """
+        # topics list layout (mirrors PRIMARY_MATH_MAJOR_TOPICS):
+        #   indices 0-9   → Number & Algebra       (10 broad topics → 18 Qs)
+        #   indices 10-17 → Measurement & Geometry  ( 8 topics      → 10 Qs)
+        #   indices 18+   → Statistics & Probability( 5 topics      →  7 Qs)
+        number_topics      = topics[:10]
+        measurement_topics = topics[10:18]
+        stats_topics       = topics[18:]
+
+        area_targets = [
+            ("Number & Algebra",         number_topics,      18),
+            ("Measurement & Geometry",   measurement_topics, 10),
+            ("Statistics & Probability", stats_topics,        7),
+        ]
+
+        all_questions: list[Question] = []
+        for area_name, area_topics, area_count in area_targets:
+            logger.info(f"  [{area_name}] Targeting {area_count} questions…")
+
+            # Distribute easy/medium/hard proportionally for this area
+            area_dist = {
+                "easy":   round(distribution["easy"]   * area_count / total),
+                "medium": round(distribution["medium"] * area_count / total),
+            }
+            area_dist["hard"] = max(0, area_count - area_dist["easy"] - area_dist["medium"])
+
+            for diff, count in area_dist.items():
+                if count <= 0:
+                    continue
+                result = self._generate_in_batches(
+                    grade=grade,
+                    subject="primary_math",
+                    topics=area_topics,
+                    difficulty=diff,
+                    num_questions=count,
+                    content_chunks_limit=20,
+                    batch_size=15,
+                    allow_similar=False,
+                    existing_questions=all_questions,
+                    validate_naplan=True,
+                )
+                all_questions.extend(result["questions"])
+                logger.info(
+                    f"    {diff}: {len(result['questions'])} generated | "
+                    f"running total: {len(all_questions)}"
+                )
+
+        for i, q in enumerate(all_questions):
+            q.question_number = i + 1
+
+        logger.info(f"Primary math full set complete: {len(all_questions)}/{total}")
+        return {
+            "questions": all_questions,
+            "mode": "exam_set",
+            "subject": "primary_math",
+            "target": total,
+            "generated": len(all_questions),
+            "status": "complete" if len(all_questions) >= total else "partial",
+        }
+
+    # ------------------------------------------------------------------
+    # MAJOR TOPIC MODE (18 questions for one major area)
+    # ------------------------------------------------------------------
+
+    def generate_major_topic_questions(
+        self,
+        grade: str,
+        major_topic: str,
+        difficulty: str = "medium",
+    ) -> dict[str, Any]:
+        """
+        Generate exactly 18 questions for ONE of the three primary math
+        major topics at a chosen difficulty level.
+
+        Args:
+            grade        : e.g. "grade3"
+            major_topic  : "number_and_algebra" | "measurement_and_geometry"
+                           | "statistics_and_probability"
+            difficulty   : "easy" | "medium" | "hard"
+
+        Returns:
+            dict with keys: questions, mode, major_topic, difficulty,
+                            target, generated, status
+        """
+        topic_key = (
+            major_topic.lower()
+            .replace(" ", "_")
+            .replace("&", "and")
+            .replace("__", "_")
+        )
+        subtopics = PRIMARY_MATH_MAJOR_TOPICS.get(topic_key)
+        if not subtopics:
+            raise ValueError(
+                f"Unknown major_topic '{major_topic}'. "
+                f"Valid choices: {list(PRIMARY_MATH_MAJOR_TOPICS.keys())}"
+            )
+
+        diff_dist = MAJOR_TOPIC_DIFFICULTY_DISTRIBUTION.get(difficulty, {"medium": 18})
+        target = sum(diff_dist.values())   # always 18
+
+        logger.info(
+            f"Generating {target} questions | major_topic={topic_key} | "
+            f"difficulty={difficulty} | distribution={diff_dist}"
+        )
+
+        all_questions: list[Question] = []
+        for diff_level, count in diff_dist.items():
+            if count <= 0:
+                continue
+            result = self._generate_in_batches(
+                grade=grade,
+                subject="primary_math",
+                topics=subtopics,
+                difficulty=diff_level,
+                num_questions=count,
+                content_chunks_limit=20,
+                batch_size=15,
+                allow_similar=False,
+                existing_questions=all_questions,
+                validate_naplan=True,
+            )
+            all_questions.extend(result["questions"])
+            logger.info(
+                f"  {diff_level}: {len(result['questions'])} generated | "
+                f"total so far: {len(all_questions)}/{target}"
+            )
+
+        for i, q in enumerate(all_questions):
+            q.question_number = i + 1
+
+        logger.info(
+            f"Major-topic set complete: {len(all_questions)}/{target} | "
+            f"topic={topic_key}"
+        )
+        return {
+            "questions": all_questions,
+            "mode": "major_topic",
+            "major_topic": topic_key,
+            "difficulty": difficulty,
+            "target": target,
+            "generated": len(all_questions),
+            "status": "complete" if len(all_questions) >= target else "partial",
+        }
+
+    # ------------------------------------------------------------------
+    # SUBTOPIC MODE
+    # ------------------------------------------------------------------
+
     def generate_subtopic_questions(
         self, grade: str, subject: str, subtopic: str, difficulty: str = "mixed"
     ) -> dict[str, Any]:
@@ -313,6 +600,10 @@ class QuestionGeneratorV2:
             "status": result.get("status", "partial"),
         }
 
+    # ------------------------------------------------------------------
+    # STANDARD MODE
+    # ------------------------------------------------------------------
+
     def generate_questions(
         self,
         grade: str,
@@ -322,6 +613,7 @@ class QuestionGeneratorV2:
         num_questions: int = 10,
         allow_similar: bool = False,
         content_chunks_limit: int = 20,
+        use_practice_test: bool = False,
     ) -> dict[str, Any]:
         return self._generate_in_batches(
             grade=grade, subject=subject, topics=topics, difficulty=difficulty,
@@ -329,6 +621,33 @@ class QuestionGeneratorV2:
             batch_size=15, allow_similar=allow_similar,
             existing_questions=[], validate_naplan=True,
         )
+
+    # ============================================================
+    # CAPACITY CHECK
+    # ============================================================
+
+    def check_capacity(
+        self,
+        grade: str,
+        subject: str | None = None,
+        topics: list[str] | None = None,
+        difficulty: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            chunks = self._retrieve_content_chunks(
+                grade=grade, subject=subject, topics=topics,
+                difficulty=difficulty, limit=500,
+            )
+            stored = self._load_all_stored_questions(grade, subject)
+            estimated = max(0, len(chunks) * 2 - len(stored))
+            return {
+                "available_chunks": len(chunks),
+                "already_generated": len(stored),
+                "estimated_remaining": estimated,
+            }
+        except Exception as e:
+            logger.warning(f"Capacity check failed: {e}")
+            return {"available_chunks": 0, "already_generated": 0, "estimated_remaining": 0}
 
     # ============================================================
     # CORE PIPELINE
@@ -433,7 +752,7 @@ class QuestionGeneratorV2:
         return self._parse_questions(response_text, grade, subject)
 
     # ============================================================
-    # PROMPT  ← FIX: sub_subject must be specific, not a copy of subject
+    # PROMPT  ← sub_subject must be specific, not a copy of subject
     # ============================================================
 
     def _build_prompt(
@@ -461,12 +780,14 @@ class QuestionGeneratorV2:
         subj_str = f"Subject: {subject}" if subject else "Subject: as per content"
         topic_str = f"Focus topics: {', '.join(topics)}" if topics else "Topics: varied"
 
-        # FIX: Explicit sub_subject rule — must be the specific maths/language topic name
+        # sub_subject rule — must be the specific maths/language topic name
         sub_subject_rule = (
             "- sub_subject: The SPECIFIC topic name tested — e.g. 'Fractions', "
-            "'Place Value', 'Multiplication', 'Money', 'Geometry', 'Probability'. "
-            "NEVER copy the subject name (e.g. NEVER write 'Numeracy' or 'Mathematics'). "
-            "Each question must have a different, precise sub_subject."
+            "'Place Value', 'Multiplication', 'Money', 'Geometry', 'Probability', "
+            "'Counting Objects', 'Skip Counting', 'Simple Addition', 'Time', "
+            "'2D Shapes', 'Bar Graphs', 'Chance'. "
+            "NEVER copy the subject name (e.g. NEVER write 'Numeracy', 'Mathematics', "
+            "'primary_math'). Each question must have a different, precise sub_subject."
         )
 
         return f"""You are an expert NAPLAN exam question writer for Australian {grade} students.
@@ -503,10 +824,10 @@ Ensure the array ends with a closing ] character.
     "option_4": "Fourth option",
     "correct_option": 1,
     "explanation": "Why this answer is correct",
-    "subject": "numeracy",
+    "subject": "primary_math",
     "sub_subject": "Place Value",
     "difficulty": "easy|medium|hard",
-    "skill_tested": "Identifying the value of a digit in a 4-digit number",
+    "skill_tested": "Identifying the value of a digit in a 3-digit number",
     "naplan_strand": "Number and Algebra",
     "pdf_source": "filename.pdf",
     "page_number": 1
@@ -516,40 +837,41 @@ Ensure the array ends with a closing ] character.
     def _get_naplan_examples(self, grade: str, subject: str | None) -> str:
         """Fetch NAPLAN examples from Qdrant reference collection, or fall back to defaults."""
         try:
-            subject_key = (subject or "general").lower().replace(" ", "_")
-            ref_col = f"{grade}_{subject_key}_naplan_reference"
-            query_embedding = self.embedding_client.embed_query(
-                f"NAPLAN {grade} {subject or ''} example question"
-            )
+            query = f"NAPLAN example question {grade} {subject or ''}"
+            query_embedding = self.embedding_client.embed_query(query)
+            col = f"{grade}_practice_test"
             results = self.qdrant_manager.search_questions(
-                collection_name=ref_col,
+                collection_name=col,
                 query_embedding=query_embedding,
-                limit=5,
+                limit=3,
             )
             if results:
-                examples = ""
-                for i, r in enumerate(results):
+                examples = []
+                for r in results:
                     payload = r.payload if hasattr(r, "payload") else {}
-                    content = payload.get("content", "") if isinstance(payload, dict) else ""
+                    content = (
+                        payload.get("content", "") if isinstance(payload, dict) else str(r)
+                    )
                     if content:
-                        examples += f"\n[NAPLAN Example {i + 1}]\n{content}\n"
+                        examples.append(content[:300])
                 if examples:
-                    return examples
+                    return "\n---\n".join(examples)
         except Exception:
             pass
-        return self._default_naplan_style(subject)
 
-    def _default_naplan_style(self, subject: str | None) -> str:
-        if subject and "numer" in subject.lower():
+        # Fallback defaults
+        if subject and "math" in subject.lower():
             return (
-                "[NAPLAN Numeracy Style]\n"
-                "- Place Value: 'What is the value of the digit 7 in 4735?' → 700\n"
-                "- Fractions: 'Which fraction is equivalent to 1/2?' → 3/6\n"
-                "- Money: 'Change from $20 after spending $13.50?' → $6.50\n"
+                "[Primary Math Style]\n"
+                "- Number: 'How many tens are in 470?' → 47\n"
+                "- Fractions: 'Which shape shows one quarter shaded?' → picture options\n"
+                "- Money: 'Tom has $2.50. He buys a snack for $1.20. How much is left?' → $1.30\n"
                 "- Measurement: 'A rectangle is 8cm long and 5cm wide. What is the area?' → 40cm²\n"
+                "- Graphs: 'The bar graph shows pets. How many more dogs than cats?' → count from graph\n"
+                "- Shapes: 'Which 3D object has a circular base?' → cone\n"
                 "- Options close in value: e.g. 38, 40, 42, 44\n"
             )
-        elif subject and ("lang" in subject.lower() or "convention" in subject.lower()):
+        if subject and ("lang" in subject.lower() or "convention" in subject.lower()):
             return (
                 "[NAPLAN Language Conventions Style]\n"
                 "- Spelling: 'Which word is spelled correctly?'\n"
@@ -619,14 +941,13 @@ Ensure the array ends with a closing ] character.
                 correct_idx = max(0, min(3, int(d.get("correct_option", 1)) - 1))
                 correct_letter = ["A", "B", "C", "D"][correct_idx]
 
-                # FIX: convert difficulty string → int
+                # convert difficulty string → int
                 diff_raw = str(d.get("difficulty", "medium")).lower().strip()
                 diff_int = DIFFICULTY_STR_TO_INT.get(diff_raw, 2)
 
-                # FIX: ensure sub_subject is specific, not a copy of subject
+                # ensure sub_subject is specific, not a copy of subject
                 raw_sub = d.get("sub_subject", "") or d.get("skill_tested", "")
                 if _is_generic_sub_subject(raw_sub, subject or ""):
-                    # Fall back to skill_tested, then naplan_strand, then topic hint
                     raw_sub = (
                         d.get("skill_tested", "")
                         or d.get("naplan_strand", "")
@@ -649,7 +970,7 @@ Ensure the array ends with a closing ] character.
                     explanation=d.get("explanation", ""),
                     difficulty=diff_int,
                     pdf_source=d.get("pdf_source", ""),
-                    page_number=int(d.get("page_number", 0)),
+                    page_number=_safe_int(d.get("page_number", 0)),
                     file_path=d.get("file_path", ""),
                     categories=f"{grade},{d.get('subject', subject or '')}",
                     content=f"<p>{d.get('question_text', '')}</p>",
@@ -726,53 +1047,6 @@ Return ONLY a raw JSON array (no markdown, no backticks):
     # DEDUPLICATION
     # ============================================================
 
-    def _load_all_stored_questions(self, grade: str, subject: str | None) -> list[Question]:
-        try:
-            query_embedding = self.embedding_client.embed_query(
-                f"{grade} {subject or ''} questions"
-            )
-            results = self.qdrant_manager.search_questions(
-                collection_name=f"{grade}_questions",
-                query_embedding=query_embedding,
-                limit=2000,
-            )
-            questions = []
-            for r in results:
-                payload = r.payload if hasattr(r, "payload") else {}
-                if isinstance(payload, dict) and payload.get("question_text"):
-                    raw_diff = payload.get("difficulty", 2)
-                    if isinstance(raw_diff, str):
-                        raw_diff = DIFFICULTY_STR_TO_INT.get(raw_diff.lower(), 2)
-
-                    fields = dict(
-                        serial_number=payload.get(
-                            "serial_number", payload.get("question_number", 0)
-                        ),
-                        class_name=payload.get(
-                            "class_name", _grade_to_class_name(grade)
-                        ),
-                        question_number=payload.get("question_number", 0),
-                        year=payload.get("year", datetime.now().year),
-                        grade=payload.get("grade", grade),
-                        subject=payload.get("subject", ""),
-                        sub_subject=payload.get("sub_subject", ""),
-                        question_text=payload.get("question_text", ""),
-                        options=payload.get("options", []),
-                        correct_answer=payload.get("correct_answer", "A"),
-                        correct_option_index=payload.get("correct_option_index", 0),
-                        explanation=payload.get("explanation", ""),
-                        difficulty=raw_diff,
-                    )
-                    q = _make_question(
-                        fields, fields["correct_answer"], fields["correct_option_index"]
-                    )
-                    if q:
-                        questions.append(q)
-            return questions
-        except Exception as e:
-            logger.warning(f"Could not load stored questions (first run?): {e}")
-            return []
-
     def _filter_duplicates(
         self, questions: list[Question], existing: list[Question], allow_similar: bool
     ) -> tuple[list[Question], int]:
@@ -830,31 +1104,78 @@ Return ONLY a raw JSON array (no markdown, no backticks):
         if not questions:
             return
         try:
-            embeddings = self.embedding_client.embed_questions_batch(questions)
+            embeddings = self.embedding_client.embed_questions(
+                [q.question_text for q in questions]
+            )
+            payloads = []
+            for q in questions:
+                payloads.append({
+                    "question_text": q.question_text,
+                    "question_number": q.question_number,
+                    "serial_number": q.serial_number,
+                    "grade": q.grade,
+                    "subject": q.subject,
+                    "sub_subject": q.sub_subject,
+                    "difficulty": q.difficulty,
+                    "options": q.options,
+                    "correct_answer": getattr(q, "correct_answer", "A"),
+                    "correct_option_index": getattr(q, "correct_option_index", 0),
+                    "explanation": q.explanation,
+                    "year": q.year,
+                    "class_name": q.class_name,
+                })
             self.qdrant_manager.upsert_questions(
                 collection_name=f"{grade}_questions",
-                questions=questions,
                 embeddings=embeddings,
+                payloads=payloads,
             )
             logger.info(f"Stored {len(questions)} questions in Qdrant")
         except Exception as e:
             logger.warning(f"Could not store questions: {e}")
 
-    def check_capacity(
-        self,
-        grade: str,
-        subject: str | None = None,
-        topics: list[str] | None = None,
-        difficulty: str | None = None,
-    ) -> dict:
-        chunks = self._retrieve_content_chunks(grade, subject, topics, difficulty, limit=100)
-        stored = self._load_all_stored_questions(grade, subject)
-        estimated = len(chunks) * 4
-        available = max(0, estimated - len(stored))
-        return {
-            "available_chunks": len(chunks),
-            "estimated_total_capacity": estimated,
-            "already_generated": len(stored),
-            "estimated_remaining": available,
-            "recommended_max": min(available, 200),
-        }
+    def _load_all_stored_questions(self, grade: str, subject: str | None) -> list[Question]:
+        try:
+            query_embedding = self.embedding_client.embed_query(
+                f"{grade} {subject or ''} questions"
+            )
+            results = self.qdrant_manager.search_questions(
+                collection_name=f"{grade}_questions",
+                query_embedding=query_embedding,
+                limit=2000,
+            )
+            questions = []
+            for r in results:
+                payload = r.payload if hasattr(r, "payload") else {}
+                if isinstance(payload, dict) and payload.get("question_text"):
+                    raw_diff = payload.get("difficulty", 2)
+                    if isinstance(raw_diff, str):
+                        raw_diff = DIFFICULTY_STR_TO_INT.get(raw_diff.lower(), 2)
+
+                    fields = dict(
+                        serial_number=payload.get(
+                            "serial_number", payload.get("question_number", 0)
+                        ),
+                        class_name=payload.get(
+                            "class_name", _grade_to_class_name(grade)
+                        ),
+                        question_number=payload.get("question_number", 0),
+                        year=payload.get("year", datetime.now().year),
+                        grade=payload.get("grade", grade),
+                        subject=payload.get("subject", ""),
+                        sub_subject=payload.get("sub_subject", ""),
+                        question_text=payload.get("question_text", ""),
+                        options=payload.get("options", []),
+                        correct_answer=payload.get("correct_answer", "A"),
+                        correct_option_index=payload.get("correct_option_index", 0),
+                        explanation=payload.get("explanation", ""),
+                        difficulty=raw_diff,
+                    )
+                    q = _make_question(
+                        fields, fields["correct_answer"], fields["correct_option_index"]
+                    )
+                    if q:
+                        questions.append(q)
+            return questions
+        except Exception as e:
+            logger.warning(f"Could not load stored questions (first run?): {e}")
+            return []

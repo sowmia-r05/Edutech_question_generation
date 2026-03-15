@@ -44,6 +44,49 @@ class CSVExporter:
         "Question Image",           # V  ← separate image column
     ]
 
+    # ── Sub-subject → Major Topic lookup sets ────────────────────────────────
+
+    _NUMBER_ALGEBRA_SUBS = {
+        "counting objects", "reading numbers", "ordering numbers",
+        "tens and ones", "hundreds", "value of digits",
+        "simple addition", "addition with carrying",
+        "simple subtraction", "subtraction with regrouping",
+        "repeated addition", "groups of objects", "simple multiplication facts",
+        "sharing equally", "grouping objects",
+        "increasing patterns", "skip counting", "missing numbers",
+        "odd and even numbers", "half", "quarter", "equal parts",
+        "adding money", "subtracting money", "counting coins",
+        # broader labels Gemini sometimes returns
+        "place value", "addition", "subtraction", "multiplication",
+        "division", "number patterns", "fractions", "money",
+        "counting and number recognition", "multiplication groups and arrays",
+        "division sharing", "simple fractions", "number and place value",
+        "patterns and algebra", "money and financial mathematics",
+        "number", "algebra", "arithmetic",
+    }
+
+    _MEASUREMENT_GEOMETRY_SUBS = {
+        "length", "mass", "capacity", "time", "area",
+        "2d shapes", "3d objects", "position and direction",
+        "measurement", "geometry", "shapes", "angles", "symmetry",
+        "perimeter", "volume", "2d shape", "3d object",
+        "position", "direction",
+    }
+
+    _STATISTICS_PROBABILITY_SUBS = {
+        "reading graphs", "picture graphs", "bar graphs",
+        "data interpretation", "chance likely unlikely",
+        "data", "statistics", "graphs", "tables",
+        "probability", "chance", "data and statistics",
+        "tally", "pictograph", "survey", "column graph",
+    }
+
+    _DIFFICULTY_LABELS = {
+        0: "Easy", 1: "Easy", 2: "Medium", 3: "Medium", 4: "Hard", 5: "Hard"
+    }
+
+    # ─────────────────────────────────────────────────────────────────────────
+
     def export_to_xlsx(
         self,
         questions,
@@ -88,8 +131,7 @@ class CSVExporter:
                 for cell in row:
                     cell.value = None
 
-            # Add "Question Image" header in column V (col 22)
-            # if not already there
+            # Add "Question Image" header in column V (col 22) if not already there
             image_col = 22
             if ws.cell(row=self.HEADER_ROW, column=image_col).value is None:
                 cell = ws.cell(row=self.HEADER_ROW, column=image_col, value="Question Image")
@@ -165,6 +207,7 @@ class CSVExporter:
         """
         Build one data row.
         Column G = explanation text ONLY
+        Column H = clean readable categories: "Major Topic, Sub Topic, Difficulty"
         Column V = image URL ONLY (separate column)
         """
         options = [self._clean_option(opt) for opt in q.options]
@@ -184,15 +227,8 @@ class CSVExporter:
         elif not image_url:
             image_url = getattr(q, "question_image", "") or ""
 
-        # Categories
-        categories = getattr(q, "categories", None)
-        if not categories:
-            parts = [p for p in [
-                getattr(q, "grade", ""),
-                getattr(q, "subject", ""),
-                getattr(q, "sub_subject", ""),
-            ] if p]
-            categories = ", ".join(parts)
+        # Categories — clean human-readable
+        categories = self._build_categories(q)
 
         row = [
             q.question_text,    # A: Question Text
@@ -217,6 +253,61 @@ class CSVExporter:
         row.append(image_url)
 
         return row
+
+    def _build_categories(self, q) -> str:
+        """
+        Build clean human-readable categories string.
+        Format: "Major Topic, Sub Topic, Difficulty"
+
+        Examples:
+          "Number & Algebra, Place Value, Easy"
+          "Measurement & Geometry, Length, Medium"
+          "Statistics & Probability, Bar Graphs, Hard"
+        """
+        sub = (getattr(q, "sub_subject", "") or "").strip()
+        sub_lower = sub.lower()
+
+        # ── Determine Major Topic ────────────────────────────────────────────
+        if sub_lower in self._NUMBER_ALGEBRA_SUBS:
+            major = "Number & Algebra"
+        elif sub_lower in self._MEASUREMENT_GEOMETRY_SUBS:
+            major = "Measurement & Geometry"
+        elif sub_lower in self._STATISTICS_PROBABILITY_SUBS:
+            major = "Statistics & Probability"
+        else:
+            # Keyword fallback for sub_subjects not in the sets
+            if any(k in sub_lower for k in [
+                "count", "number", "add", "subtract", "multipl", "divis",
+                "fraction", "money", "pattern", "place", "odd", "even",
+                "coin", "skip", "algebra", "arith",
+            ]):
+                major = "Number & Algebra"
+            elif any(k in sub_lower for k in [
+                "length", "mass", "time", "area", "shape", "object",
+                "position", "capacity", "geometry", "measure", "perimeter",
+                "volume", "angle", "symmetr",
+            ]):
+                major = "Measurement & Geometry"
+            elif any(k in sub_lower for k in [
+                "graph", "data", "chance", "probab", "statistic",
+                "tally", "survey", "pictograph",
+            ]):
+                major = "Statistics & Probability"
+            else:
+                major = "Numeracy"
+
+        # ── Sub Topic display — title case, clean ────────────────────────────
+        sub_display = sub.title() if sub else "General"
+
+        # ── Difficulty label ─────────────────────────────────────────────────
+        diff_int = getattr(q, "difficulty", 0)
+        try:
+            diff_int = int(diff_int)
+        except (TypeError, ValueError):
+            diff_int = 0
+        diff_label = self._DIFFICULTY_LABELS.get(diff_int, "Easy")
+
+        return f"{major}, {sub_display}, {diff_label}"
 
     def _get_correct_index(self, q) -> int:
         val = getattr(q, "correct_option_index", None)
