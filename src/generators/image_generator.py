@@ -8,6 +8,14 @@ Key improvements over v1:
   Spelling, Grammar, Punctuation)
 - Year-level aware (Year 3/4/5 vs Year 7/9) for age-appropriate diagrams
 - Word-problem illustrator generates countable objects, not generic scenes
+
+STRICT RULES enforced in every prompt:
+  1. EXACT COUNT — if the question says 7 bananas, draw exactly 7 bananas.
+     Count each object before finalising. Never approximate.
+  2. NO QUESTION TEXT — do not write the question or any part of it in the image.
+  3. NO ANSWER — never reveal, circle, highlight, or hint at the correct answer.
+  4. OBJECT–QUESTION MATCH — every object, number, and shape in the image must
+     come directly from the question. Do not add or remove anything.
 """
 
 import logging
@@ -19,6 +27,30 @@ from src.core.models import Question
 from src.utils.s3_uploader import S3Uploader
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STRICT RULES FOOTER — appended to EVERY prompt
+# ─────────────────────────────────────────────────────────────────────────────
+
+_STRICT_RULES = (
+    "\n\n"
+    "══════════════════════════════════════════════════════\n"
+    "MANDATORY RULES — follow all of these without exception:\n"
+    "══════════════════════════════════════════════════════\n"
+    "1. EXACT COUNT: Count every object you draw. "
+    "If the question specifies a number (e.g. 7 bananas, 12 apples, 3 groups of 4), "
+    "draw EXACTLY that number — not one more, not one less. "
+    "Lay objects out in a neat grid or rows so they are easy to count and verify.\n"
+    "2. NO QUESTION TEXT: Do NOT write the question sentence, any part of it, "
+    "or any explanatory sentence in the image. No captions, no question wording.\n"
+    "3. NO ANSWER: Do NOT write, circle, highlight, underline, arrow-point, "
+    "or in any way indicate the correct answer. Leave any answer blank or as '?'.\n"
+    "4. MATCH THE QUESTION: Only draw objects, shapes, and numbers explicitly "
+    "mentioned in the question. Do not add extra objects for decoration.\n"
+    "5. WHITE BACKGROUND: Plain white background only.\n"
+    "══════════════════════════════════════════════════════"
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,7 +125,6 @@ _ALGEBRA_KW = re.compile(
     r"function machine|number machine)\b",
     re.IGNORECASE,
 )
-# Language
 _SPELLING_KW = re.compile(
     r"\b(spell|spelling|correct spelling|which word|word that is correct|"
     r"misspell|missing letters?|fill in the blank)\b",
@@ -118,52 +149,30 @@ _PUNCTUATION_KW = re.compile(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _detect_question_type(question_text: str, sub_subject: str) -> str:
-    """
-    Classify into a fine-grained visual type.
-    Priority order ensures the most specific match wins.
-    """
     text = f"{question_text} {sub_subject}".lower()
-
-    if _DATA_KW.search(text):
-        return "data_chart"
-    if _TIME_KW.search(text):
-        return "time"
-    if _MONEY_KW.search(text):
-        return "money"
-    if _FRACTION_KW.search(text):
-        return "fraction"
-    if _DIVISION_KW.search(text):
-        return "division"
-    if _MULTIPLICATION_KW.search(text):
-        return "multiplication"
-    if _PATTERN_KW.search(text):
-        return "pattern"
-    if _PLACE_VALUE_KW.search(text):
-        return "place_value"
-    if _ALGEBRA_KW.search(text):
-        return "algebra"
-    if _GEOMETRY_3D_KW.search(text):
-        return "geometry_3d"
-    if _GEOMETRY_2D_KW.search(text):
-        return "geometry_2d"
-    if _MEASUREMENT_KW.search(text):
-        return "measurement"
-    if _SPELLING_KW.search(text):
-        return "spelling"
-    if _GRAMMAR_KW.search(text):
-        return "grammar"
-    if _PUNCTUATION_KW.search(text):
-        return "punctuation"
+    if _DATA_KW.search(text):           return "data_chart"
+    if _TIME_KW.search(text):           return "time"
+    if _MONEY_KW.search(text):          return "money"
+    if _FRACTION_KW.search(text):       return "fraction"
+    if _DIVISION_KW.search(text):       return "division"
+    if _MULTIPLICATION_KW.search(text): return "multiplication"
+    if _PATTERN_KW.search(text):        return "pattern"
+    if _PLACE_VALUE_KW.search(text):    return "place_value"
+    if _ALGEBRA_KW.search(text):        return "algebra"
+    if _GEOMETRY_3D_KW.search(text):    return "geometry_3d"
+    if _GEOMETRY_2D_KW.search(text):    return "geometry_2d"
+    if _MEASUREMENT_KW.search(text):    return "measurement"
+    if _SPELLING_KW.search(text):       return "spelling"
+    if _GRAMMAR_KW.search(text):        return "grammar"
+    if _PUNCTUATION_KW.search(text):    return "punctuation"
     return "word_problem"
 
 
 def _extract_numbers(text: str) -> list[str]:
-    """Pull all numeric values and simple fractions from question text."""
     return re.findall(r"\d+(?:[./]\d+)?", text)
 
 
 def _extract_shapes(text: str) -> list[str]:
-    """Pull shape names from question text."""
     shapes = re.findall(
         r"\b(triangle|square|rectangle|circle|pentagon|hexagon|octagon|"
         r"rhombus|trapezium|cube|sphere|cone|cylinder|pyramid|prism)\b",
@@ -175,6 +184,27 @@ def _extract_shapes(text: str) -> list[str]:
 def _is_year_7_9(grade: str) -> bool:
     num = re.sub(r"[^0-9]", "", grade or "")
     return num in ("7", "8", "9", "10")
+
+
+def _extract_object_count(question_text: str) -> tuple[str, str]:
+    """
+    Extract (exact_count, object_name) from question text.
+    e.g. "There are 7 bananas" -> ("7", "banana")
+    Returns ("", "") if not found.
+    """
+    match = re.search(
+        r"\b(\d+)\s+(?:\w+\s+)?"
+        r"(apple|orange|banana|cake|cookie|biscuit|ball|book|bag|box|"
+        r"pencil|pen|bottle|cup|glass|chair|table|tree|flower|bird|fish|"
+        r"car|bus|train|dog|cat|student|child|person|people|boy|girl|"
+        r"ticket|token|marble|block|cube|sticker|card|coin|toy|lolly|"
+        r"grape|mango|star|heart|dot|counter|chip|bead|button|shell|"
+        r"leaf|leaves|egg|sweet|lemon|strawberr|cherry|cherries)s?\b",
+        question_text, re.IGNORECASE
+    )
+    if match:
+        return match.group(1), match.group(2).lower().rstrip("s")
+    return "", ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -201,219 +231,210 @@ class ImagePromptBuilder:
     )
 
     def build(self, question: Question) -> str:
-        q_text = question.question_text
-        sub = question.sub_subject or question.subject
-        grade = question.grade or "grade3"
-        q_type = _detect_question_type(q_text, sub)
-        numbers = _extract_numbers(q_text)
-        shapes = _extract_shapes(q_text)
+        q_text    = question.question_text
+        sub       = question.sub_subject or question.subject
+        grade     = question.grade or "grade3"
+        q_type    = _detect_question_type(q_text, sub)
+        numbers   = _extract_numbers(q_text)
+        shapes    = _extract_shapes(q_text)
         secondary = _is_year_7_9(grade)
-        style = self.BASE_STYLE_SECONDARY if secondary else self.BASE_STYLE_PRIMARY
+        style     = self.BASE_STYLE_SECONDARY if secondary else self.BASE_STYLE_PRIMARY
 
         method = getattr(self, f"_prompt_{q_type}", self._prompt_word_problem)
-        return method(q_text, sub, numbers, shapes, style, secondary)
+        # Strict rules are appended to EVERY prompt
+        return method(q_text, sub, numbers, shapes, style, secondary) + _STRICT_RULES
 
     # ── MATHS TYPES ──────────────────────────────────────────────────────────
 
     def _prompt_division(self, q, sub, nums, shapes, style, secondary):
+        total   = nums[0] if nums else "12"
+        divisor = nums[1] if len(nums) > 1 else "3"
+        try:
+            each = str(int(total) // int(divisor))
+        except (ValueError, ZeroDivisionError):
+            each = "?"
         return (
             f"{style}"
-            f"Draw a division diagram that directly matches this question:\n\"{q}\"\n\n"
-            f"Choose ONE of the following visual models that best fits the question:\n"
-            f"  (A) SHARING MODEL: draw a set of objects (e.g. {nums[0] if nums else 12} "
-            f"apples, stars, or counters) arranged in a row, then show them being "
-            f"distributed equally into {nums[1] if len(nums) > 1 else '3'} groups/plates. "
-            f"Each group must show the same number of objects.\n"
-            f"  (B) GROUPING MODEL: draw the total objects in one pool, then circle "
-            f"equal-sized groups of the divisor.\n"
-            f"  (C) ARRAY MODEL: draw rows and columns (e.g. 3 rows of 4 = 12).\n\n"
-            f"Rules:\n"
-            f"- Choose whichever model makes the question most visual and self-explanatory.\n"
-            f"- Show the exact numbers from the question as object counts.\n"
-            f"- Label each group with the group size OR leave blank if asking 'how many in each?'.\n"
-            f"- Do NOT write the final answer or the division symbol in the image.\n"
-            f"- Use cute simple objects (stars ★, circles, apples, dots) not abstract squares.\n"
-            f"- Large, clear, colourful, suitable for a student worksheet."
+            f"Draw a division diagram (do NOT copy or include any question text in the image):\n"
+            f"Total objects: {total}. Number of groups: {divisor}. Objects per group: {each}.\n\n"
+            f"Visual model:\n"
+            f"- Draw exactly {total} identical simple objects (circles or stars).\n"
+            f"- Arrange them into exactly {divisor} clearly separated groups "
+            f"(use dashed oval borders around each group).\n"
+            f"- Each group must contain exactly {each} objects. "
+            f"Count every object carefully before finishing.\n"
+            f"- Label each group 'Group 1', 'Group 2', etc. — nothing else.\n"
+            f"- Do NOT write the division equation or the answer anywhere.\n"
+            f"- Space objects so every single one is clearly visible and countable."
         )
 
     def _prompt_multiplication(self, q, sub, nums, shapes, style, secondary):
-        rows = nums[0] if nums else "3"
-        cols = nums[1] if len(nums) > 1 else "4"
+        rows  = nums[0] if nums else "3"
+        cols  = nums[1] if len(nums) > 1 else "4"
+        try:
+            total = str(int(rows) * int(cols))
+        except ValueError:
+            total = "?"
         return (
             f"{style}"
-            f"Draw a multiplication diagram for this question:\n\"{q}\"\n\n"
-            f"Visual model to draw:\n"
-            f"  ARRAY MODEL: draw a rectangular grid of objects — "
-            f"{rows} rows of {cols} objects each.\n"
-            f"  Use cute identical objects (stars, circles, smiley faces, dots).\n"
-            f"  Label each row and each column clearly.\n"
-            f"  Write the multiplication sentence ABOVE the array: "
-            f"\"{rows} × {cols} = ?\"\n"
-            f"  Show a dotted brace/arrow labelling the rows and columns.\n\n"
-            f"Rules:\n"
-            f"- Do NOT write the product/answer next to '= ?'.\n"
-            f"- Keep the grid clean and evenly spaced.\n"
-            f"- Use alternating colours for each row to make counting easy.\n"
-            f"- Large, bright, easy to count."
+            f"Draw a multiplication array diagram (do NOT copy or include any question text in the image):\n"
+            f"Rows: {rows}. Columns per row: {cols}. Total objects: {total}.\n\n"
+            f"Visual model:\n"
+            f"- Draw a rectangular grid: exactly {rows} rows, each containing exactly {cols} objects.\n"
+            f"- Total object count must be exactly {total}. Count every object before finishing.\n"
+            f"- Use identical simple objects (stars or filled circles) — same shape in every cell.\n"
+            f"- Draw a dotted brace on the left labelled '{rows} rows' "
+            f"and a brace on top labelled '{cols} per row'.\n"
+            f"- Do NOT write the multiplication sentence, product, or any equation.\n"
+            f"- Keep the grid evenly spaced so each object is individually visible."
         )
 
     def _prompt_fraction(self, q, sub, nums, shapes, style, secondary):
-        # Try to detect the fraction from the question text
         fraction_match = re.search(r"(\d+)\s*/\s*(\d+)", q)
-        frac_str = fraction_match.group(0) if fraction_match else (nums[0] + "/" + nums[1] if len(nums) >= 2 else "1/4")
-        num = fraction_match.group(1) if fraction_match else "1"
-        den = fraction_match.group(2) if fraction_match else "4"
-        shape_hint = "rectangle" if not shapes else shapes[0]
+        if fraction_match:
+            frac_str = fraction_match.group(0)
+            num_part = fraction_match.group(1)
+            den_part = fraction_match.group(2)
+        elif len(nums) >= 2:
+            num_part, den_part = nums[0], nums[1]
+            frac_str = f"{num_part}/{den_part}"
+        else:
+            num_part, den_part, frac_str = "1", "4", "1/4"
+
+        shape_hint = shapes[0] if shapes else "rectangle"
+        try:
+            unshaded = str(int(den_part) - int(num_part))
+        except ValueError:
+            unshaded = "the rest"
+
         return (
             f"{style}"
-            f"Draw a fraction diagram for this question:\n\"{q}\"\n\n"
-            f"Instructions:\n"
-            f"- Draw a {shape_hint} (or circle if more appropriate) divided into "
-            f"{den} EQUAL parts.\n"
-            f"- Shade exactly {num} part(s) in a bright colour to represent the fraction {frac_str}.\n"
-            f"- Label each part (e.g. '1/{den}') inside the sections.\n"
-            f"- Write the fraction '{frac_str}' as a large label beneath the shape.\n"
-            f"- If the question uses a number line, draw a number line from 0 to 1 "
-            f"with {den} equal divisions and mark the fraction point.\n"
-            f"- Do NOT show the correct answer to the question.\n"
-            f"- Large, clear, easy for a primary student to read."
+            f"Draw a fraction diagram (do NOT copy or include any question text in the image):\n"
+            f"Fraction to show: {frac_str}. Shape: {shape_hint}.\n\n"
+            f"Visual model:\n"
+            f"- Draw one {shape_hint} divided into exactly {den_part} EQUAL parts "
+            f"(all parts must be identical in size).\n"
+            f"- Shade exactly {num_part} part(s) in a bright solid colour. "
+            f"Leave exactly {unshaded} part(s) unshaded (white).\n"
+            f"- Write only the fraction label '{frac_str}' centred below the shape.\n"
+            f"- If a number line is more appropriate: draw a horizontal line from 0 to 1 "
+            f"with exactly {den_part} equal tick divisions; mark the fraction point with a filled dot.\n"
+            f"- Do NOT write the question text or the answer anywhere."
         )
 
     def _prompt_pattern(self, q, sub, nums, shapes, style, secondary):
-        # Extract the sequence from the question if possible
         sequence = re.findall(r"\d+", q)
-        seq_str = ", ".join(sequence[:5]) if sequence else "2, 4, 6, 8"
+        seq_shown = sequence[:6] if sequence else ["2", "4", "6", "8"]
+        seq_str   = ", ".join(seq_shown)
+        count     = len(seq_shown)
         return (
             f"{style}"
-            f"Draw the number or shape pattern from this question:\n\"{q}\"\n\n"
-            f"Instructions:\n"
-            f"- If it is a NUMBER PATTERN ({seq_str}…): write each number inside a "
-            f"coloured circle or box, evenly spaced in a row. "
-            f"Draw a blank box (with a '?') at the position asking for the missing term.\n"
-            f"- If it is a SHAPE PATTERN: draw the shapes in sequence, use a blank box "
-            f"with '?' at the position the student must find.\n"
-            f"- Draw arrows between each term showing the direction of the pattern.\n"
-            f"- Label each term '1st', '2nd', '3rd', etc. below the shapes/boxes.\n"
-            f"- Use alternating bright colours for each term.\n"
-            f"- Do NOT fill in the '?' box.\n"
-            f"- Clear, bold, easy to read from left to right."
+            f"Draw a number pattern diagram (do NOT copy or include any question text in the image):\n"
+            f"Sequence: {seq_str}, ?\n\n"
+            f"Visual model:\n"
+            f"- Draw exactly {count} coloured boxes or circles in a horizontal row, evenly spaced.\n"
+            f"- Write one number from the sequence inside each box: {seq_str}.\n"
+            f"- After the last known term, draw one empty box containing only '?'.\n"
+            f"- Draw a small arrow between each consecutive box.\n"
+            f"- Label each box '1st', '2nd', '3rd', etc. below.\n"
+            f"- Do NOT write the pattern rule, the answer, or the question text."
         )
 
     def _prompt_place_value(self, q, sub, nums, shapes, style, secondary):
         number = nums[0] if nums else "456"
         digits = list(str(number).replace(",", "").replace(".", ""))
         place_names = ["Thousands", "Hundreds", "Tens", "Ones"]
-        # align from right
         aligned = place_names[-(len(digits)):] if len(digits) <= 4 else place_names
         return (
             f"{style}"
-            f"Draw a place value diagram for this question:\n\"{q}\"\n\n"
-            f"Choose the best visual:\n"
-            f"  (A) PLACE VALUE TABLE: draw a 2-row table. "
-            f"Top row = column headers: {' | '.join(aligned)}. "
-            f"Bottom row = the digits {' | '.join(digits)}. "
-            f"Use a distinct colour for each place column.\n"
-            f"  (B) BASE-10 BLOCKS: draw the correct number of "
-            f"large squares (hundreds), long rods (tens), and small cubes (ones) "
-            f"to represent the number {number}.\n\n"
-            f"Rules:\n"
-            f"- Choose whichever model best matches the wording of the question.\n"
-            f"- Label every column or block clearly.\n"
-            f"- Do NOT show the answer to the question.\n"
-            f"- Clean, colourful grid lines."
+            f"Draw a place value table (do NOT copy or include any question text in the image):\n"
+            f"Number: {number}. Digits: {', '.join(digits)}.\n\n"
+            f"Visual model:\n"
+            f"- Draw a 2-row table with {len(digits)} columns.\n"
+            f"- Header row (coloured background): {' | '.join(aligned)}.\n"
+            f"- Data row: {' | '.join(digits)} — one digit per column, large font.\n"
+            f"- Use a distinct background colour for each column header.\n"
+            f"- Do NOT write the number in full outside the table or show the answer."
         )
 
     def _prompt_algebra(self, q, sub, nums, shapes, style, secondary):
+        known = nums[0] if nums else "7"
+        total = nums[1] if len(nums) > 1 else "15"
         return (
             f"{style}"
-            f"Draw a visual algebra or function machine diagram for:\n\"{q}\"\n\n"
-            f"Instructions:\n"
-            f"- If it is a MISSING NUMBER equation (e.g. '7 + __ = 15'): "
-            f"draw a balance scale with the left side showing the known values "
-            f"and the right side showing the total, with a question mark box for the unknown.\n"
-            f"- If it is a FUNCTION MACHINE: draw an input box → machine box → output box. "
-            f"Label the operation inside the machine (+, -, ×, ÷ with the number). "
-            f"Show the known input/output values.\n"
-            f"- If it is a NUMBER PATTERN or SEQUENCE: show boxes for each term, "
-            f"with arrows labelled with the rule (e.g. '+3').\n"
-            f"- For Year 7/9: draw a Cartesian coordinate plane if the question "
-            f"involves graphing or substitution.\n"
-            f"- Do NOT show the answer.\n"
-            f"- Use bold labels, bright colours, clean lines."
+            f"Draw an algebra balance-scale diagram (do NOT copy or include any question text in the image):\n"
+            f"Known value: {known}. Total/result: {total}. Unknown: ?.\n\n"
+            f"Visual model:\n"
+            f"- Draw a balance scale (triangle fulcrum, horizontal beam, two pans).\n"
+            f"- Left pan: show {known} as stacked blocks labelled '{known}'.\n"
+            f"- Right pan: show {total} as stacked blocks labelled '{total}'.\n"
+            f"- Place a box labelled '?' above or beside the left pan for the unknown.\n"
+            f"- Do NOT write the equation, the answer, or the question text."
         )
 
     def _prompt_geometry_2d(self, q, sub, nums, shapes, style, secondary):
-        shape_list = shapes if shapes else ["shape"]
+        shape_list = shapes if shapes else ["rectangle"]
         dims = nums[:4] if nums else []
-        dim_hint = (
-            f"Label the sides with the measurements {' cm, '.join(dims[:4])} cm"
-            if dims else "Label any side lengths if mentioned"
+        side_labels = (
+            f"Label the sides with these measurements: {', '.join(d + ' cm' for d in dims[:4])}."
+            if dims else "Label sides only if measurements appear in the question."
         )
         return (
             f"{style}"
-            f"Draw a precise geometric diagram for this question:\n\"{q}\"\n\n"
-            f"Instructions:\n"
-            f"- Draw the shape(s): {', '.join(shape_list)}.\n"
-            f"- {dim_hint}.\n"
-            f"- If the question mentions SYMMETRY: draw the line(s) of symmetry "
-            f"as a dashed line through the shape.\n"
-            f"- If the question mentions ANGLES: mark the angle clearly with an arc "
-            f"and the degree value.\n"
-            f"- If the question mentions PERIMETER or AREA: label all sides, "
-            f"but do NOT calculate or write the answer.\n"
-            f"- If SHADING is described: shade the correct portion.\n"
-            f"- Clean geometric lines using a ruler-like precision, no freehand wobbly lines.\n"
-            f"- Large, clear, black outlines with coloured fills or highlights."
+            f"Draw a geometry diagram (do NOT copy or include any question text in the image):\n"
+            f"Shape(s): {', '.join(shape_list)}.\n\n"
+            f"Visual model:\n"
+            f"- Draw the shape(s) with clean, precise straight lines (ruler-style, not freehand).\n"
+            f"- {side_labels}\n"
+            f"- If symmetry: draw dashed line(s) of symmetry only.\n"
+            f"- If angles: mark the angle with an arc and its degree value.\n"
+            f"- If shading is required: shade the described portion only.\n"
+            f"- Do NOT write the area, perimeter answer, or the question text."
         )
 
     def _prompt_geometry_3d(self, q, sub, nums, shapes, style, secondary):
-        shape_list = shapes if shapes else ["3D object"]
+        shape_list = shapes if shapes else ["rectangular prism"]
         return (
             f"{style}"
-            f"Draw a clear 3D object diagram for this question:\n\"{q}\"\n\n"
-            f"Instructions:\n"
-            f"- Draw the 3D solid(s): {', '.join(shape_list)} in a slight isometric "
-            f"perspective so all key faces are visible.\n"
-            f"- Label the number of: FACES, EDGES, VERTICES if the question asks about them.\n"
-            f"- If the question is about a NET: draw the unfolded net of the solid "
-            f"with each face clearly outlined and labelled.\n"
-            f"- Use different shades for each visible face to show depth.\n"
-            f"- Do NOT show the answer to the question.\n"
-            f"- Clean, accurate, large enough to count faces/edges easily."
+            f"Draw a 3D solid diagram (do NOT copy or include any question text in the image):\n"
+            f"Solid(s): {', '.join(shape_list)}.\n\n"
+            f"Visual model:\n"
+            f"- Draw the solid in slight isometric perspective so all key faces are visible.\n"
+            f"- Use different shades of the same colour for each visible face to show depth.\n"
+            f"- If faces/edges/vertices are asked about: label counts on the diagram.\n"
+            f"- If a net is required: draw the unfolded flat net with each face outlined.\n"
+            f"- Do NOT write the answer or the question text."
         )
 
     def _prompt_measurement(self, q, sub, nums, shapes, style, secondary):
         instrument = "ruler"
         if re.search(r"\b(mass|weight|kg|gram|balance|scale)\b", q, re.I):
-            instrument = "weighing scale or balance"
+            instrument = "weighing scale"
         elif re.search(r"\b(thermometer|temperature|degrees)\b", q, re.I):
             instrument = "thermometer"
         elif re.search(r"\b(capacity|litre|ml|beaker|jug|container)\b", q, re.I):
-            instrument = "measuring jug or beaker"
+            instrument = "measuring jug"
         elif re.search(r"\b(area|square|grid|tile)\b", q, re.I):
-            instrument = "grid of squares"
+            instrument = "square grid"
 
+        reading = nums[0] if nums else "the value in the question"
         return (
             f"{style}"
-            f"Draw a measurement diagram for this question:\n\"{q}\"\n\n"
-            f"Instrument to draw: {instrument}\n\n"
-            f"Instructions:\n"
-            f"- Draw the {instrument} with clearly visible scale markings and units.\n"
-            f"- Show the measurement value indicated in the question "
-            f"({', '.join(nums[:3]) if nums else 'as described'}).\n"
-            f"- Mark the reading point with a clear indicator (arrow, line, or pointer).\n"
-            f"- Do NOT write the answer to the question.\n"
-            f"- If it is an AREA question: draw the shape on a square grid and shade it, "
-            f"but do NOT write the area total.\n"
-            f"- Large readable scale markings, suitable for a worksheet."
+            f"Draw a measurement diagram (do NOT copy or include any question text in the image):\n"
+            f"Instrument: {instrument}. Reading: {reading}.\n\n"
+            f"Visual model:\n"
+            f"- Draw the {instrument} with clearly visible, evenly spaced scale markings and units.\n"
+            f"- Mark the reading '{reading}' with an arrow or pointer landing EXACTLY on the "
+            f"correct mark — not between marks.\n"
+            f"- Do NOT write the answer or the question text."
         )
 
     def _prompt_time(self, q, sub, nums, shapes, style, secondary):
-        # Detect if it's an analog clock, digital, or calendar question
-        is_calendar = bool(re.search(r"\b(calendar|day|week|month|year|monday|tuesday|"
-                                     r"wednesday|thursday|friday|saturday|sunday|january|"
-                                     r"february|march|april|may|june|july|august|"
-                                     r"september|october|november|december)\b", q, re.I))
+        is_calendar = bool(re.search(
+            r"\b(calendar|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+            r"january|february|march|april|may|june|july|august|"
+            r"september|october|november|december)\b", q, re.I
+        ))
         is_digital = bool(re.search(r"\b(digital|display|screen|shows)\b", q, re.I))
 
         if is_calendar:
@@ -424,222 +445,223 @@ class ImagePromptBuilder:
             month = month_match.group(0).capitalize() if month_match else "March"
             return (
                 f"{style}"
-                f"Draw a simple monthly calendar page for this question:\n\"{q}\"\n\n"
-                f"Instructions:\n"
-                f"- Draw a calendar grid for {month}.\n"
-                f"- Show 7 columns labelled Mon, Tue, Wed, Thu, Fri, Sat, Sun.\n"
-                f"- Fill in the correct dates (use a standard month layout).\n"
-                f"- Highlight or circle any specific date mentioned in the question.\n"
-                f"- Clean grid lines, bold day headers.\n"
-                f"- Do NOT show the answer to the question."
+                f"Draw a monthly calendar (do NOT copy or include any question text in the image):\n"
+                f"Month: {month}.\n\n"
+                f"Visual model:\n"
+                f"- Draw a calendar grid for {month}: 7 columns labelled Mon Tue Wed Thu Fri Sat Sun.\n"
+                f"- Fill in all correct dates using a standard layout.\n"
+                f"- Circle only the specific date(s) mentioned in the question.\n"
+                f"- Do NOT write the answer or the question text."
             )
 
-        time_vals = re.findall(r"\d{1,2}(?::\d{2})?(?:\s*(?:am|pm|o'clock))?", q, re.I)
-        time_str = time_vals[0] if time_vals else "3:00"
+        time_vals = re.findall(r"\d{1,2}:\d{2}|\d{1,2}\s*(?:o'clock|am|pm)", q, re.I)
+        time_str  = time_vals[0].strip() if time_vals else (nums[0] + ":00" if nums else "3:00")
+        hour_match = re.search(r"(\d{1,2})(?::(\d{2}))?", time_str)
+        hour   = hour_match.group(1) if hour_match else "3"
+        minute = hour_match.group(2) if (hour_match and hour_match.group(2)) else "00"
         clock_type = "digital display" if is_digital else "analog clock face"
 
         return (
             f"{style}"
-            f"Draw a {clock_type} showing the time for this question:\n\"{q}\"\n\n"
-            f"Instructions:\n"
-            f"- Draw a clear {clock_type}.\n"
-            f"- If ANALOG: draw a round clock face with all 12 numbers, "
-            f"hour and minute hands pointing to {time_str}. "
-            f"Use a thick short hand for hours and a long thin hand for minutes. "
-            f"Include minute tick marks.\n"
-            f"- If DIGITAL: draw a rectangular digital display showing {time_str} "
-            f"in large 7-segment LCD style digits.\n"
-            f"- Do NOT write the time as text below the clock.\n"
-            f"- Large, clear, easy to read."
+            f"Draw a {clock_type} (do NOT copy or include any question text in the image):\n"
+            f"Time: {hour}:{minute}.\n\n"
+            f"Visual model:\n"
+            f"- ANALOG: round face, all 12 numbers 1–12, 60 minute tick marks. "
+            f"Hour hand (short thick) at {hour}. Minute hand (long thin) at minute {minute}. "
+            f"Place hands at the EXACT angle for {hour}:{minute}.\n"
+            f"- DIGITAL: rectangular LCD display showing {hour}:{minute} in large 7-segment digits.\n"
+            f"- Do NOT write the time as text elsewhere in the image."
         )
 
     def _prompt_money(self, q, sub, nums, shapes, style, secondary):
         amounts = re.findall(r"\$\s*\d+(?:\.\d{2})?|\d+\s*cents?|\d+c\b", q, re.I)
-        amount_str = ", ".join(amounts[:4]) if amounts else "the amounts shown in the question"
+        amount_str = ", ".join(amounts[:4]) if amounts else (
+            f"${nums[0]}" if nums else "the amounts in the question"
+        )
         return (
             f"{style}"
-            f"Draw an Australian money illustration for this question:\n\"{q}\"\n\n"
-            f"Instructions:\n"
-            f"- Draw the specific Australian coins and/or notes: {amount_str}.\n"
-            f"- Australian coins: gold $2 (large), gold $1, silver 50c (dodecagon), "
-            f"silver 20c, silver 10c, small silver 5c.\n"
-            f"- Australian notes: $5 polymer pink/mauve, $10 blue, $20 red/orange, "
-            f"$50 yellow/gold, $100 green. Show a simplified rectangular note "
-            f"with the denomination printed large.\n"
-            f"- Arrange coins/notes clearly, evenly spaced.\n"
-            f"- Label each coin/note with its value.\n"
-            f"- Do NOT draw the total or the answer.\n"
-            f"- Bright, clear, realistic-cartoon style."
+            f"Draw an Australian money illustration (do NOT copy or include any question text in the image):\n"
+            f"Amounts: {amount_str}.\n\n"
+            f"Visual model:\n"
+            f"- Draw ONLY these specific coins/notes: {amount_str}.\n"
+            f"- Coins: gold $2 (large), gold $1, silver 50c (12-sided), silver 20c, "
+            f"silver 10c, small silver 5c.\n"
+            f"- Notes: simple rectangle — $5 pink, $10 blue, $20 red, $50 yellow, $100 green — "
+            f"denomination in large text on the note.\n"
+            f"- Label each coin/note with its value. Space them clearly.\n"
+            f"- Do NOT draw the total, change, or the answer."
         )
 
     def _prompt_data_chart(self, q, sub, nums, shapes, style, secondary):
-        # Detect if it's a tally, bar graph, table, or picture graph
-        is_tally = bool(re.search(r"\b(tally|tally marks?)\b", q, re.I))
-        is_bar = bool(re.search(r"\b(bar graph|column graph|bar chart)\b", q, re.I))
+        is_tally   = bool(re.search(r"\b(tally|tally marks?)\b", q, re.I))
+        is_bar     = bool(re.search(r"\b(bar graph|column graph|bar chart)\b", q, re.I))
         is_picture = bool(re.search(r"\b(picture graph|pictograph|symbol)\b", q, re.I))
-        is_table = bool(re.search(r"\b(table|list|frequency table)\b", q, re.I))
 
-        # Extract categories if present
         cats = re.findall(r"'([^']+)'|\"([^\"]+)\"", q)
         cat_list = [c[0] or c[1] for c in cats[:5]]
+        cat_str  = ", ".join(cat_list) if cat_list else "the categories in the question"
+        vals     = nums[:len(cat_list)] if nums else []
+        val_str  = ", ".join(f"{c}={v}" for c, v in zip(cat_list, vals)) if vals else \
+                   "values as given in the question"
 
         if is_tally:
             return (
                 f"{style}"
-                f"Draw a TALLY TABLE for this question:\n\"{q}\"\n\n"
-                f"Instructions:\n"
-                f"- Draw a 3-column table: Category | Tally | Total.\n"
-                f"- Use the categories mentioned in the question "
-                f"({', '.join(cat_list) if cat_list else 'e.g. Football, Cricket, Swimming'}).\n"
-                f"- Draw the correct tally marks (groups of 5 with a diagonal cross stroke) "
-                f"as described in the question.\n"
-                f"- Write the numeric totals in the Total column.\n"
-                f"- Bold column headers, clean grid lines, readable tally marks.\n"
-                f"- Do NOT highlight or circle the correct answer to the question."
+                f"Draw a tally table (do NOT copy or include any question text in the image):\n"
+                f"Categories: {cat_str}. Values: {val_str}.\n\n"
+                f"Visual model:\n"
+                f"- Draw a 3-column table: Category | Tally Marks | Total.\n"
+                f"- For each category draw the EXACT tally mark count "
+                f"(groups of 4 vertical + 1 diagonal for every 5).\n"
+                f"- Write the numeric total in the Total column.\n"
+                f"- Bold column headers, clean grid lines.\n"
+                f"- Do NOT highlight the answer row."
             )
+
         if is_bar:
             return (
                 f"{style}"
-                f"Draw a COLUMN / BAR GRAPH for this question:\n\"{q}\"\n\n"
-                f"Instructions:\n"
-                f"- Draw vertical bars for each category mentioned "
-                f"({', '.join(cat_list) if cat_list else 'use the categories in the question'}).\n"
-                f"- The bars must reflect the values given in the question.\n"
-                f"- Label the x-axis with category names and the y-axis with a numeric scale.\n"
-                f"- Title the graph based on what is being measured.\n"
-                f"- Use a different bright colour for each bar.\n"
-                f"- Do NOT indicate which bar is the 'correct answer'.\n"
-                f"- Neat grid lines, clear axis labels."
+                f"Draw a bar/column graph (do NOT copy or include any question text in the image):\n"
+                f"Categories: {cat_str}. Bar values: {val_str}.\n\n"
+                f"Visual model:\n"
+                f"- Draw vertical bars for: {cat_str}.\n"
+                f"- Bar heights must exactly match: {val_str}.\n"
+                f"- x-axis: category names. y-axis: numeric scale starting at 0.\n"
+                f"- Different solid colour per bar. Horizontal grid lines at each interval.\n"
+                f"- Do NOT indicate the answer bar."
             )
+
         if is_picture:
             return (
                 f"{style}"
-                f"Draw a PICTURE GRAPH (pictograph) for this question:\n\"{q}\"\n\n"
-                f"Instructions:\n"
-                f"- Draw rows for each category "
-                f"({', '.join(cat_list) if cat_list else 'use categories from the question'}).\n"
-                f"- Use a simple emoji-style symbol (e.g. ★ or ☺) for each unit.\n"
-                f"- Include a KEY showing what each symbol represents (e.g. ★ = 2 votes).\n"
-                f"- Align symbols neatly in rows.\n"
-                f"- Do NOT indicate the answer.\n"
-                f"- Colourful, clearly labelled."
+                f"Draw a pictograph (do NOT copy or include any question text in the image):\n"
+                f"Categories: {cat_str}. Values: {val_str}.\n\n"
+                f"Visual model:\n"
+                f"- Rows for each category. Draw EXACTLY the correct number of symbols per row.\n"
+                f"- Include a KEY box: 'Symbol = X units'.\n"
+                f"- Symbols identical and neatly aligned in each row.\n"
+                f"- Do NOT indicate the answer row."
             )
-        # Default: data table
+
         return (
             f"{style}"
-            f"Draw a neat DATA TABLE for this question:\n\"{q}\"\n\n"
-            f"Instructions:\n"
-            f"- Draw a table with the correct columns and rows as described.\n"
-            f"- Use the category names and values from the question.\n"
-            f"- Bold the header row with a coloured background.\n"
-            f"- Alternate row shading (white and light grey) for readability.\n"
-            f"- Do NOT indicate which value is the answer.\n"
-            f"- Clear borders, readable font."
+            f"Draw a data table (do NOT copy or include any question text in the image):\n"
+            f"Categories: {cat_str}. Values: {val_str}.\n\n"
+            f"Visual model:\n"
+            f"- Table with correct column/row headers and exact values from the question.\n"
+            f"- Bold coloured header row. Alternate row shading.\n"
+            f"- Do NOT indicate the answer cell."
         )
 
     # ── LANGUAGE TYPES ───────────────────────────────────────────────────────
 
     def _prompt_spelling(self, q, sub, nums, shapes, style, secondary):
-        # Extract any blank/underline pattern
-        blank_match = re.search(r"(\w+)[\s_]{2,}(\w+)|_+", q)
         return (
             f"Clean educational spelling worksheet illustration. "
-            f"White background. Simple, friendly design. "
-            f"Large bold sans-serif font. Bright primary colours.\n\n"
-            f"Draw a spelling activity visual for this question:\n\"{q}\"\n\n"
-            f"Instructions:\n"
-            f"- If the question has a FILL-IN-THE-BLANK word (e.g. 'happ___'): "
-            f"draw the word large with the missing letters shown as underscores or boxes. "
-            f"Use a bright dashed underline for the blank section.\n"
-            f"- If the question asks to IDENTIFY the correct spelling: "
-            f"draw 3-4 word cards in a row, each inside a rounded rectangle. "
-            f"Do NOT highlight the correct one.\n"
-            f"- Add a simple, friendly icon next to the word that illustrates its meaning "
-            f"(e.g. 'running' → small stick figure running).\n"
-            f"- Large, legible text. No sentences, just the word(s).\n"
-            f"- Do NOT circle or indicate the correct answer."
+            f"White background. Large bold sans-serif font.\n\n"
+            f"Draw a spelling activity visual (do NOT copy or include any question text in the image):\n\n"
+            f"Visual model:\n"
+            f"- Fill-in-the-blank: draw the word large with missing letters as blank boxes. "
+            f"No other text.\n"
+            f"- Pick correct spelling: draw 3–4 word cards in rounded rectangles — "
+            f"all cards identical in style.\n"
+            f"- Add one small icon illustrating the word's meaning.\n"
+            f"- Do NOT highlight or circle the correct spelling."
         )
 
     def _prompt_grammar(self, q, sub, nums, shapes, style, secondary):
         return (
             f"Clean educational grammar worksheet illustration. "
-            f"White background. Simple, friendly design. "
-            f"Large bold sans-serif font.\n\n"
-            f"Draw a grammar visual for this question:\n\"{q}\"\n\n"
-            f"Instructions:\n"
-            f"- Write the sentence from the question in large, clear text inside "
-            f"a rounded speech-bubble or text box.\n"
-            f"- Underline or highlight (in yellow) the word that is being tested "
-            f"(noun/verb/adjective/adverb as relevant).\n"
-            f"- Add a small colour-coded label below the highlighted word showing "
-            f"its part of speech (e.g. a blue tag 'VERB', an orange tag 'NOUN').\n"
-            f"- If the question is about VERB TENSE: show a small timeline arrow "
-            f"labelled Past → Present → Future, with a marker at the relevant tense.\n"
-            f"- If the question is about SUBJECT-VERB AGREEMENT: "
-            f"draw two side-by-side boxes showing the singular vs plural form.\n"
-            f"- Do NOT indicate which answer option is correct.\n"
-            f"- Large font, clean and simple."
+            f"White background. Large bold sans-serif font.\n\n"
+            f"Draw a grammar visual (do NOT copy or include any question text in the image):\n\n"
+            f"Visual model:\n"
+            f"- Draw the key sentence inside a rounded speech bubble.\n"
+            f"- Underline or highlight in yellow the word being tested.\n"
+            f"- Add a small colour-coded tag below (e.g. blue = VERB, orange = NOUN).\n"
+            f"- Verb tense: draw a Past → Present → Future arrow with a marker.\n"
+            f"- Do NOT indicate which answer option is correct."
         )
 
     def _prompt_punctuation(self, q, sub, nums, shapes, style, secondary):
         return (
             f"Clean educational punctuation worksheet illustration. "
-            f"White background. Simple, friendly design. "
-            f"Large bold sans-serif font.\n\n"
-            f"Draw a punctuation visual for this question:\n\"{q}\"\n\n"
-            f"Instructions:\n"
-            f"- Write the sentence from the question in large text inside a "
-            f"speech bubble or clean text box.\n"
-            f"- If the question is about a MISSING punctuation mark: "
-            f"show the sentence with a bright red question-mark-shaped gap "
-            f"(▢) where the punctuation mark belongs.\n"
-            f"- If it is about CAPITAL LETTERS: highlight the relevant word in yellow, "
-            f"showing the lowercase version with a red strikethrough and the "
-            f"correct capitalised version in green beside it.\n"
-            f"- If it is about APOSTROPHES: draw two word cards — "
-            f"the full form (e.g. 'do not') and the contracted form (e.g. \"don't\") "
-            f"with an arrow between them and the apostrophe highlighted in red.\n"
-            f"- Do NOT show which answer is correct.\n"
-            f"- Clear, well-spaced layout."
+            f"White background. Large bold sans-serif font.\n\n"
+            f"Draw a punctuation visual (do NOT copy or include any question text in the image):\n\n"
+            f"Visual model:\n"
+            f"- Show the key sentence in a text box with a gap symbol (▢) "
+            f"where the punctuation belongs.\n"
+            f"- Capital letters: lowercase with red strikethrough, correct form in green beside it.\n"
+            f"- Apostrophes: two word cards (full form → contracted form) "
+            f"with arrow and apostrophe in red.\n"
+            f"- Do NOT reveal the correct punctuation in the gap."
         )
 
     def _prompt_word_problem(self, q, sub, nums, shapes, style, secondary):
-        """Fallback for generic word problems — create a countable object scene."""
-        # Try to identify what objects are in the problem
-        objects = re.findall(
-            r"\b(apple|orange|banana|cake|cookie|biscuit|ball|book|bag|box|"
-            r"pencil|pen|bottle|cup|glass|chair|table|tree|flower|bird|fish|"
-            r"car|bus|train|dog|cat|student|child|person|people|boy|girl|"
-            r"ticket|token|marble|block|cube|sticker|card|coin|toy|lolly|"
-            r"grape|mango|star|heart|dot)\b", q, re.I
-        )
-        obj_str = objects[0].lower() if objects else "object"
-        total = nums[0] if nums else "some"
+        """Fallback for generic word problems — draw exact countable objects."""
+        count, obj = _extract_object_count(q)
+
+        if not obj:
+            obj_match = re.search(
+                r"\b(apple|orange|banana|cake|cookie|biscuit|ball|book|bag|box|"
+                r"pencil|pen|bottle|cup|glass|chair|tree|flower|bird|fish|"
+                r"car|bus|dog|cat|student|child|person|boy|girl|ticket|"
+                r"marble|block|sticker|card|coin|toy|lolly|grape|mango|"
+                r"star|heart|dot|counter|bead|button|shell|leaf|egg|sweet)\b",
+                q, re.IGNORECASE
+            )
+            obj = obj_match.group(0).lower() if obj_match else "circle"
+
+        if not count:
+            count = nums[0] if nums else "8"
+
+        is_split  = bool(re.search(r"\b(share|split|divide|give each|equal group)\b", q, re.I))
+        is_add    = bool(re.search(r"\b(add|together|altogether|total|combined|join)\b", q, re.I))
+        is_remove = bool(re.search(r"\b(take away|remove|eat|lost|left|gave away|used)\b", q, re.I))
+
+        if is_split:
+            groups = nums[1] if len(nums) > 1 else "3"
+            op = (
+                f"- Arrange all {count} {obj}s into exactly {groups} equally separated groups "
+                f"(dashed oval border around each group). Each group must have the same count.\n"
+            )
+        elif is_add:
+            second = nums[1] if len(nums) > 1 else "4"
+            op = (
+                f"- Show two separate groups side by side: "
+                f"one group of exactly {count} {obj}s and a second group of exactly {second} {obj}s, "
+                f"with a '+' symbol between them.\n"
+            )
+        elif is_remove:
+            remove = nums[1] if len(nums) > 1 else "3"
+            op = (
+                f"- Draw exactly {count} {obj}s. "
+                f"Cross out exactly {remove} of them with a clear red X.\n"
+            )
+        else:
+            op = (
+                f"- Arrange all {count} {obj}s in neat rows of 5 "
+                f"so every one is clearly visible and countable.\n"
+            )
+
         return (
             f"{style}"
-            f"Draw a simple, countable scene for this word problem:\n\"{q}\"\n\n"
-            f"Instructions:\n"
-            f"- Draw {total} {obj_str}s arranged in a clear, countable layout "
-            f"(rows, groups, or a spread).\n"
-            f"- If the problem involves SPLITTING or SHARING: show the objects "
-            f"being distributed into groups with a dividing line.\n"
-            f"- If the problem involves COMBINING: show two groups with a '+' "
-            f"symbol between them.\n"
-            f"- If the problem involves TAKING AWAY: show the original group with "
-            f"some items crossed out or faded.\n"
-            f"- Keep objects large enough to count (max 24 items on screen).\n"
-            f"- Do NOT write the answer or any numbers.\n"
-            f"- Colourful, friendly cartoon style. White background."
+            f"Draw a simple countable scene (do NOT copy or include any question text in the image):\n"
+            f"Object: {obj}. Exact total count: {count}.\n\n"
+            f"Visual model:\n"
+            f"- Draw exactly {count} {obj}s. "
+            f"Count every one before finishing — not {int(count)-1 if count.isdigit() else '?'}, "
+            f"not {int(count)+1 if count.isdigit() else '?'}, exactly {count}.\n"
+            f"{op}"
+            f"- Each {obj} must be clearly drawn, identically styled, not overlapping, "
+            f"and individually distinguishable.\n"
+            f"- Keep objects large enough to count easily (max 5 per row).\n"
+            f"- Do NOT write any numbers, the question text, or the answer."
         )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN IMAGE GENERATOR CLASS
 # ─────────────────────────────────────────────────────────────────────────────
-
-# Imagen models use client.models.generate_images() — NOT generate_content().
-# Gemini image models use client.models.generate_content() with IMAGE modality.
-# This class auto-detects which API to use based on the model name.
 
 IMAGEN_MODELS = {
     "imagen-4.0-fast-generate-001",
@@ -675,18 +697,17 @@ class ImageGenerator:
 
         try:
             from google import genai
-            self.genai = genai
+            self.genai  = genai
             self.client = genai.Client(api_key=self.api_key)
         except ImportError:
             raise ImportError("Run: pip install google-genai")
 
-        self.model_name = model_name
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
-        self.s3_uploader = s3_uploader
+        self.model_name      = model_name
+        self.max_retries     = max_retries
+        self.retry_delay     = retry_delay
+        self.s3_uploader     = s3_uploader
         self._prompt_builder = ImagePromptBuilder()
 
-        # Detect API type once at init
         self._use_imagen = any(
             self.model_name.startswith(m.split("-generate")[0])
             for m in IMAGEN_MODELS
@@ -704,7 +725,6 @@ class ImageGenerator:
         question: "Question",
         image_style: str = "educational illustration",
     ) -> "str | None":
-        """Generate a contextual image for a question and upload to S3."""
         try:
             prompt = self._prompt_builder.build(question)
             q_type = _detect_question_type(
@@ -738,11 +758,10 @@ class ImageGenerator:
         questions: "list[Question]",
         image_style: str = "educational illustration",
     ) -> "dict[int, str]":
-        """Generate images for a batch of questions → {question_number: s3_url}."""
         image_urls: dict[int, str] = {}
         for question in questions:
             try:
-                time.sleep(1.5)   # stay within rate limits
+                time.sleep(1.5)
                 s3_url = self.generate_question_image(question, image_style)
                 if s3_url:
                     image_urls[question.question_number] = s3_url
@@ -755,7 +774,6 @@ class ImageGenerator:
     # ── Internal API dispatch ─────────────────────────────────────────────────
 
     def _generate_with_retry(self, prompt: str) -> "bytes | None":
-        """Call the correct Gemini API and return raw PNG bytes, with retries."""
         for attempt in range(1, self.max_retries + 1):
             try:
                 image_bytes = (
@@ -766,49 +784,29 @@ class ImageGenerator:
                 if image_bytes:
                     logger.info(f"Image generated: {len(image_bytes)} bytes")
                     return image_bytes
-
                 logger.warning(f"No image bytes on attempt {attempt}")
                 return None
 
             except Exception as e:
                 is_last = attempt == self.max_retries
-                wait = self.retry_delay * (2 ** (attempt - 1))  # 2s, 4s, 8s
+                wait    = self.retry_delay * (2 ** (attempt - 1))
                 if is_last:
-                    logger.error(
-                        f"Image generation failed after {self.max_retries} attempts: {e}"
-                    )
+                    logger.error(f"Image generation failed after {self.max_retries} attempts: {e}")
                     return None
                 logger.warning(f"Attempt {attempt} failed — retrying in {wait:.0f}s: {e}")
                 time.sleep(wait)
-
         return None
 
     def _call_imagen(self, prompt: str) -> "bytes | None":
-        """
-        Call Imagen 4 via client.models.generate_images().
-        Returns raw PNG bytes.
-
-        Confirmed working path (matches Colab test):
-            response.generated_images[i].image.image_bytes
-        """
         from google.genai import types
-
-        # IMPORTANT: Keep config minimal for imagen-4.0-fast-generate-001.
-        # Adding aspect_ratio, safety_filter_level, or person_generation
-        # causes a ClientError on this model — they are not supported.
         response = self.client.models.generate_images(
             model=self.model_name,
             prompt=prompt,
-            config=types.GenerateImagesConfig(
-                number_of_images=1,
-            ),
+            config=types.GenerateImagesConfig(number_of_images=1),
         )
-
         if not response.generated_images:
             logger.warning("Imagen returned no images — prompt may have been blocked")
             return None
-
-        # Exact path confirmed in Colab:  img.image.image_bytes
         try:
             image_bytes = response.generated_images[0].image.image_bytes
             if image_bytes:
@@ -820,19 +818,12 @@ class ImageGenerator:
             gen_img = response.generated_images[0]
             logger.error(
                 f"Unexpected Imagen response structure: {e}\n"
-                f"  generated_images[0] attrs: {[a for a in dir(gen_img) if not a.startswith('_')]}\n"
-                f"  .image attrs: {[a for a in dir(gen_img.image) if not a.startswith('_')]}"
+                f"  attrs: {[a for a in dir(gen_img) if not a.startswith('_')]}"
             )
             return None
 
     def _call_gemini_image(self, prompt: str) -> "bytes | None":
-        """
-        Call Gemini image models (e.g. gemini-2.5-flash-image)
-        via client.models.generate_content() with IMAGE modality.
-        Returns raw PNG bytes.
-        """
         from google.genai import types
-
         response = self.client.models.generate_content(
             model=self.model_name,
             contents=prompt,
@@ -840,10 +831,8 @@ class ImageGenerator:
                 response_modalities=["IMAGE", "TEXT"],
             ),
         )
-
         for part in response.candidates[0].content.parts:
             if part.inline_data is not None:
                 return part.inline_data.data
-
         logger.warning("Gemini image response contained no IMAGE part")
         return None

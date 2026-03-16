@@ -7,7 +7,7 @@ Row 2:    Instructions (fill: #EEF2FF, font: Calibri)
 Row 3+:   Data rows   (fill: #EFF6FF, font: Calibri, wrap text)
 
 Columns:
-  A: question_text  ← HTML with embedded base64 image when available
+  A: question_text  ← plain question text only (no image HTML)
   B: type
   C: option_a
   D: option_b
@@ -16,7 +16,7 @@ Columns:
   G: correct_answer
   H: points
   I: category
-  J: image_url      ← S3 URL kept for reference
+  J: image_url      ← base64 data URI compressed to <20KB (falls back to S3 URL)
   K: explanation
 """
 
@@ -314,13 +314,10 @@ class CSVExporter:
         """
         Build one data row.
 
-        question_text (column A):
-          - No image  → plain question text
-          - Has image → HTML:
-              <p>question text<br /><img src="data:image/png;base64,..."/></p>
-            Image is compressed to <20KB before encoding.
-
-        image_url (column J): S3 URL kept for reference.
+        question_text (column A): always plain text — no image HTML embedded.
+        image_url (column J):     base64 data URI (data:image/jpeg;base64,...),
+                                  compressed to <20KB. Falls back to S3 URL if
+                                  base64 not available.
         """
         options = list(getattr(q, "options", []) or [])
         while len(options) < 4:
@@ -330,33 +327,29 @@ class CSVExporter:
         correct_idx    = self._get_correct_index(q)
         correct_letter = self._CORRECT_LETTER_MAP.get(correct_idx, "A")
 
-        # S3 URL → column J
-        image_url = ""
-        artifacts = getattr(q, "artifacts", None)
-        if artifacts and isinstance(artifacts, list) and artifacts:
-            image_url = str(artifacts[0])
-        if not image_url:
-            image_url = getattr(q, "question_image", "") or ""
-
         explanation = getattr(q, "explanation", "") or ""
         category    = self._build_categories(q)
 
-        # ── question_text: embed base64 image if available ────────────────────
-        # q.image_base64 is set by generate_questions.py after downloading
-        # the S3 image, compressing it to <20KB, and encoding as base64.
-        image_b64 = getattr(q, "image_base64", None) or ""
-        if image_b64:
-            if not image_b64.startswith("data:"):
-                image_b64 = f"data:image/png;base64,{image_b64}"
-            question_html = (
-                f"<p>{q.question_text}"
-                f"<br /><img src=\"{image_b64}\" /></p>"
-            )
-        else:
-            question_html = q.question_text
+        # ── image_url (column J): use compressed base64 data URI ─────────────
+        # q.image_base64 is set by generate_questions.py after downloading the
+        # S3 image, compressing it to <20KB, and encoding as base64.
+        image_url = getattr(q, "image_base64", None) or ""
+        if image_url and not image_url.startswith("data:"):
+            image_url = f"data:image/jpeg;base64,{image_url}"
+
+        # Fall back to S3 URL if no base64 available
+        if not image_url:
+            artifacts = getattr(q, "artifacts", None)
+            if artifacts and isinstance(artifacts, list) and artifacts:
+                image_url = str(artifacts[0])
+        if not image_url:
+            image_url = getattr(q, "question_image", "") or ""
+
+        # ── question_text (column A): always plain text ───────────────────────
+        question_text = q.question_text
 
         return [
-            question_html,      # A — question_text (HTML with embedded image)
+            question_text,      # A — question_text (plain, no image HTML)
             "radio_button",     # B — type
             options[0],         # C — option_a
             options[1],         # D — option_b
@@ -365,7 +358,7 @@ class CSVExporter:
             correct_letter,     # G — correct_answer
             1,                  # H — points
             category,           # I — category
-            image_url,          # J — image_url (S3 URL)
+            image_url,          # J — image_url (base64 data URI or S3 URL)
             explanation,        # K — explanation
         ]
 
