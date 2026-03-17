@@ -35,8 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from core import EmbeddingClient, QdrantManager
 from core.models import Question
-from generators import QuestionGeneratorV2
-from generators.hybrid_image_generator import HybridImageGenerator
+from generators import ImageGenerator, QuestionGeneratorV2
 from generators.question_generator_v2 import (
     EXAM_SET_CONFIG,
     PRIMARY_MATH_MAJOR_TOPICS,
@@ -320,7 +319,7 @@ def _export_and_finish(questions: list, args, generate_images: bool) -> None:
     if generate_images:
         logger.info(f"\nGenerating images for {len(questions)} questions...")
         s3_uploader     = S3Uploader()
-        image_generator = HybridImageGenerator(s3_uploader=s3_uploader)
+        image_generator = ImageGenerator(s3_uploader=s3_uploader)
         image_style     = getattr(args, "image_style", "colorful educational diagram")
 
         # generate_images_batch → {question_number: s3_url}
